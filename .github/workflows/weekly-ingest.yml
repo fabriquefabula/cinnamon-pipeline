@@ -1,0 +1,26 @@
+name: Weekly Movie Ingestion
+
+on:
+  schedule:
+    # Sundays at 09:00 UTC — comfortably after TMDB's daily export publishes (~7-8am UTC)
+    - cron: '0 9 * * 0'
+  workflow_dispatch: {} # lets you trigger this manually from the Actions tab — use this for the first run
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    # GitHub's hard cap for hosted runners is 360 minutes; the first run (up to
+    # 250k movies to hydrate) is the only one likely to run long, budget for it.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm run ingest
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
