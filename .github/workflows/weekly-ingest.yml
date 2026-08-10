@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
       min_vote_count:
-        description: 'Override MIN_VOTE_COUNT for this run (blank = script default, 300)'
+        description: 'Override MIN_VOTE_COUNT for this run (blank = script default, 20)'
         type: string
         required: false
 
