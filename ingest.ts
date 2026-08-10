@@ -25,7 +25,13 @@ const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const CATALOG_TARGET = 250_000; // cap, not a quota — see note above
-const MIN_VOTE_COUNT = 300; // starting point, tune once real numbers come back
+// Overridable per-run so threshold candidates can be probed via DRY_RUN
+// without editing this file each time. Falls back to 300 if unset/empty.
+const MIN_VOTE_COUNT = process.env.MIN_VOTE_COUNT ? parseInt(process.env.MIN_VOTE_COUNT, 10) : 300;
+// When true: run discovery/counting only, log the result, and exit before
+// touching Supabase at all (no pipeline_runs row, no hydration, no writes).
+// For probing where vote_count stops being a meaningful mainstream signal.
+const DRY_RUN = process.env.DRY_RUN === 'true';
 const RECENT_MONTHS = 6;
 const MIN_RECENT_POPULARITY = 20; // rough floor for "clearly mainstream buzz" on new titles — also untuned
 const CONCURRENCY = 20; // stays well under TMDB's ~40-50 req/s soft limit
@@ -248,6 +254,13 @@ async function runWithConcurrency<T, R>(
 }
 
 async function main() {
+  if (DRY_RUN) {
+    console.log(`[DRY RUN] MIN_VOTE_COUNT=${MIN_VOTE_COUNT} — discovery only, no hydration, no DB writes.`);
+    await selectMainstreamIds();
+    console.log('[DRY RUN] Done. No pipeline_runs row was created and nothing was written to Supabase.');
+    return;
+  }
+
   const { data: run, error: runErr } = await supabase
     .from('pipeline_runs')
     .insert({ run_type: 'ingestion', status: 'running' })
