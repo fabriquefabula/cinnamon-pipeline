@@ -4,7 +4,16 @@ on:
   schedule:
     # Sundays at 09:00 UTC — comfortably after TMDB's daily export publishes (~7-8am UTC)
     - cron: '0 9 * * 0'
-  workflow_dispatch: {} # lets you trigger this manually from the Actions tab — use this for the first run
+  workflow_dispatch: # lets you trigger this manually from the Actions tab
+    inputs:
+      dry_run:
+        description: 'Dry run: discovery/count only, no hydration, no DB writes'
+        type: boolean
+        default: false
+      min_vote_count:
+        description: 'Override MIN_VOTE_COUNT for this run (blank = script default, 300)'
+        type: string
+        required: false
 
 jobs:
   ingest:
@@ -23,4 +32,6 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MIN_VOTE_COUNT: ${{ github.event.inputs.min_vote_count }}
 
