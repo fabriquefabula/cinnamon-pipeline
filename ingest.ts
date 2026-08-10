@@ -25,9 +25,11 @@ const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const CATALOG_TARGET = 250_000; // cap, not a quota — see note above
-// Overridable per-run so threshold candidates can be probed via DRY_RUN
-// without editing this file each time. Falls back to 300 if unset/empty.
-const MIN_VOTE_COUNT = process.env.MIN_VOTE_COUNT ? parseInt(process.env.MIN_VOTE_COUNT, 10) : 300;
+// Chosen 2026-08 after probing the count curve: 300 -> ~11k, 20 -> ~65k,
+// 10 -> ~100k qualifying movies. Still overridable per-run (DRY_RUN +
+// MIN_VOTE_COUNT input) for future re-tuning, but this is the real default —
+// the unattended weekly cron run always uses this value.
+const MIN_VOTE_COUNT = process.env.MIN_VOTE_COUNT ? parseInt(process.env.MIN_VOTE_COUNT, 10) : 20;
 // When true: run discovery/counting only, log the result, and exit before
 // touching Supabase at all (no pipeline_runs row, no hydration, no writes).
 // For probing where vote_count stops being a meaningful mainstream signal.
