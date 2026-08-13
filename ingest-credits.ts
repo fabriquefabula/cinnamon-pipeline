@@ -80,7 +80,7 @@ async function processMovie(movie: {
           : null,
         known_for_department: p.known_for_department,
         popularity: p.popularity,
-        hydration_status: 'basic', // biography needs a separate /person/{id} call -- not fetched here
+        hydration_status: 'pending', // only name/profile/etc. populated here -- biography needs a separate /person/{id} pass
       })),
       { onConflict: 'tmdb_person_id' },
     )
