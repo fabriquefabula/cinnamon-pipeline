@@ -125,16 +125,16 @@ async function processMovie(movie: {
 // checked per-movie (which would double the number of round trips).
 async function getAlreadyIngestedMovieIds(): Promise<Set<string>> {
   const ids = new Set<string>();
-  let offset = 0;
+  let cursor: string | null = null;
   while (true) {
-    const { data, error } = await supabase
-      .from('movie_credits')
-      .select('movie_id')
-      .range(offset, offset + 999);
+    let query = supabase.from('movie_credits').select('id, movie_id').order('id').limit(1000);
+    if (cursor) query = query.gt('id', cursor);
+
+    const { data, error } = await query;
     if (error || !data || data.length === 0) break;
     for (const row of data) ids.add(row.movie_id as string);
+    cursor = data[data.length - 1].id as string;
     if (data.length < 1000) break;
-    offset += 1000;
   }
   return ids;
 }
@@ -151,19 +151,23 @@ async function main() {
   const alreadyDone = await getAlreadyIngestedMovieIds();
   console.log(`${alreadyDone.size} movies already have credits, will skip them.`);
 
-  let offset = 0;
+  let cursor: string | null = null;
   let processed = 0;
   let castTotal = 0;
   let crewTotal = 0;
   let failures = 0;
 
   outer: while (true) {
-    const { data: movies, error } = await supabase
+    let query = supabase
       .from('movies')
       .select('id, tmdb_id')
       .not('tmdb_id', 'is', null)
       .order('id')
-      .range(offset, offset + PAGE_SIZE - 1);
+      .limit(PAGE_SIZE);
+
+    if (cursor) query = query.gt('id', cursor);
+
+    const { data: movies, error } = await query;
 
     if (error) {
       console.error('Failed to fetch movies batch:', error.message);
@@ -171,6 +175,7 @@ async function main() {
     }
     if (!movies || movies.length === 0) break;
 
+    cursor = movies[movies.length - 1].id; // advance regardless of how many get skipped below
     const todo = movies.filter((m) => !alreadyDone.has(m.id));
 
     for (let i = 0; i < todo.length; i += CONCURRENCY) {
@@ -197,8 +202,6 @@ async function main() {
 
       if (movieLimit && processed >= movieLimit) break outer;
     }
-
-    offset += PAGE_SIZE;
   }
 
   console.log(
