@@ -183,6 +183,9 @@ async function main() {
 
     cursor = movies[movies.length - 1].id; // advance regardless of how many get skipped below
     const todo = movies.filter((m) => !alreadyDone.has(m.id));
+    console.log(
+      `Page fetched: ${movies.length} movies, ${todo.length} new, ${movies.length - todo.length} already done. Cursor now ${cursor}.`,
+    );
 
     for (let i = 0; i < todo.length; i += CONCURRENCY) {
       const chunk = todo.slice(i, i + CONCURRENCY);
