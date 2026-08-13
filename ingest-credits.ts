@@ -35,9 +35,12 @@ async function fetchCredits(
   tmdbId: number,
 ): Promise<{ cast: TmdbCastMember[]; crew: TmdbCrewMember[] } | null> {
   try {
-    const res = await fetch(
-      `https://api.themoviedb.org/3/movie/${tmdbId}/credits?api_key=${TMDB_API_KEY}`,
-    );
+    const res = await fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/credits`, {
+      headers: {
+        Authorization: `Bearer ${TMDB_API_KEY}`,
+        accept: 'application/json',
+      },
+    });
     if (!res.ok) {
       if (res.status !== 404) console.error(`TMDB ${res.status} for tmdb_id=${tmdbId}`);
       return null;
