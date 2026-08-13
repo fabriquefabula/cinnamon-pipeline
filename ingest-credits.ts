@@ -34,12 +34,15 @@ interface TmdbCrewMember extends TmdbPerson {
 async function fetchCredits(
   tmdbId: number,
 ): Promise<{ cast: TmdbCastMember[]; crew: TmdbCrewMember[] } | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
   try {
     const res = await fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/credits`, {
       headers: {
         Authorization: `Bearer ${TMDB_API_KEY}`,
         accept: 'application/json',
       },
+      signal: controller.signal,
     });
     if (!res.ok) {
       if (res.status !== 404) console.error(`TMDB ${res.status} for tmdb_id=${tmdbId}`);
@@ -47,8 +50,11 @@ async function fetchCredits(
     }
     return await res.json();
   } catch (err) {
-    console.error(`Fetch failed for tmdb_id=${tmdbId}:`, err);
+    const reason = err instanceof Error && err.name === 'AbortError' ? 'timeout' : err;
+    console.error(`Fetch failed for tmdb_id=${tmdbId}:`, reason);
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
