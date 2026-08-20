@@ -2,7 +2,7 @@
 // don't have it yet. Existing rows were hydrated before this field was
 // captured (see ingest.ts) -- new movies get it automatically from here on.
 // Safe to re-run or interrupt: only selects movies where the column is
-// still null, so a rerun just picks up wherever the last one stopped.
+// still empty, so a rerun just picks up wherever the last one stopped.
 //
 // Required env vars: TMDB_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // Optional: DRY_RUN=true, MOVIE_LIMIT=<n>
@@ -61,10 +61,13 @@ async function main() {
   let failures = 0;
 
   outer: while (true) {
+    // The column was added with `default '{}'::text[]`, so every
+    // pre-existing row already reads back as an empty array, not null --
+    // filter on that (an empty array literal), not .is(...null).
     let query = supabase
       .from('movies')
       .select('id, tmdb_id')
-      .is('production_companies', null)
+      .eq('production_companies', [])
       .not('tmdb_id', 'is', null)
       .order('id')
       .limit(PAGE_SIZE);
