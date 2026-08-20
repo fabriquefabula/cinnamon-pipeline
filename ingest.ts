@@ -178,6 +178,7 @@ interface MovieRow {
   keywords: string[];
   top_cast: string[];
   directors: string[];
+  production_companies: string[];
   tagline: string | null;
   import_rank_popularity: number;
   hydration_status: string;
@@ -200,6 +201,9 @@ async function hydrateMovie(tmdbId: number, rank: number): Promise<MovieRow | nu
   const directors: string[] = (d.credits?.crew ?? [])
     .filter((c: any) => c.job === 'Director')
     .map((c: any) => c.name);
+  // production_companies comes back on the base /movie/{id} response --
+  // no append_to_response needed, it was just never extracted before.
+  const productionCompanies: string[] = (d.production_companies ?? []).map((c: any) => c.name);
 
   const overviewLen = d.overview.trim().length as number;
   const scoringEligible =
@@ -231,6 +235,7 @@ async function hydrateMovie(tmdbId: number, rank: number): Promise<MovieRow | nu
     keywords,
     top_cast: cast,
     directors,
+    production_companies: productionCompanies,
     tagline: d.tagline || null,
     import_rank_popularity: rank,
     hydration_status: 'complete',
