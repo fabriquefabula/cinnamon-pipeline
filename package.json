@@ -4,10 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "ingest": "tsx ingest.ts"
+    "ingest": "tsx ingest.ts",
+    "cluster-movies": "tsx cluster-movies.ts",
+    "assign-movie-clusters": "tsx assign-movie-clusters.ts"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0"
+    "@supabase/supabase-js": "^2.45.0",
+    "@anthropic-ai/sdk": "latest"
   },
   "devDependencies": {
     "tsx": "^4.16.0",
