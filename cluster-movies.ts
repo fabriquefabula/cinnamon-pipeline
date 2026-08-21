@@ -171,7 +171,9 @@ async function labelCluster(members: MovieRow[]): Promise<string> {
   const response = await anthropic.messages.create({
     model: LABEL_MODEL,
     max_tokens: 30,
-    temperature: 0.3,
+    // No temperature param -- claude-sonnet-5 rejects it outright
+    // ("temperature is deprecated for this model"), confirmed via the
+    // first real run's error, not assumed up front.
     system:
       "You name real clusters of movies for a recommendation site's browse categories. These groupings came from clustering actual emotional/tonal data, not from a rule -- your job is only to describe what genuinely unites this specific group, in the group's own terms. Write ONE short, specific, evocative label, 2-5 words. Not a generic genre name, and not a mechanical adjective-plus-noun template applied the same way every time -- look at what these particular descriptions actually share and name that. Respond with only the label text: no quotes, no punctuation at the end, no explanation.",
     messages: [{ role: 'user', content: listing }],
