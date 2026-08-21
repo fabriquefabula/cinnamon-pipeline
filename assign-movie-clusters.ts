@@ -1,10 +1,11 @@
 // Incremental companion to cluster-movies.ts: assigns any scored movie
 // that doesn't have a cluster assignment yet to the EXISTING clusters
-// (nearest + any others within that cluster's radius, same rule as the
-// full pipeline). No LLM calls, no re-clustering, no centroid changes --
-// just distance math against clusters that already exist, which is why
-// this is safe to run on a schedule while cluster-movies.ts (which can
-// reshape the whole taxonomy) stays a manual, deliberate trigger.
+// (native + up to 3 secondary, same movie-relative-distance rule as the
+// full pipeline -- see cluster-movies.ts header). No LLM calls, no
+// re-clustering, no centroid changes -- just distance math against
+// clusters that already exist, which is why this is safe to run on a
+// schedule while cluster-movies.ts (which can reshape the whole
+// taxonomy) stays a manual, deliberate trigger.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // Optional: DRY_RUN=true
@@ -15,7 +16,8 @@ const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 const DRY_RUN = process.env.DRY_RUN === 'true';
 
-const MAX_SECONDARY_CLUSTERS = 3; // must match cluster-movies.ts, so behavior is consistent regardless of which script assigned a given movie
+const SECONDARY_MULTIPLIER = 1.4; // must match cluster-movies.ts
+const MAX_CLUSTERS_PER_MOVIE = 4; // must match cluster-movies.ts
 const PAGE_SIZE = 1000;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -43,17 +45,12 @@ function dist(a: number[], b: number[]): number {
 interface Cluster {
   id: string;
   centroid: number[];
-  radius: number;
 }
 
 async function fetchClusters(): Promise<Cluster[]> {
-  const { data, error } = await supabase.from('movie_theme_clusters').select('id, centroid, radius');
+  const { data, error } = await supabase.from('movie_theme_clusters').select('id, centroid');
   if (error) throw error;
-  return (data ?? []).map((c: any) => ({
-    id: c.id,
-    centroid: normalize(JSON.parse(c.centroid)),
-    radius: c.radius,
-  }));
+  return (data ?? []).map((c: any) => ({ id: c.id, centroid: normalize(JSON.parse(c.centroid)) }));
 }
 
 async function fetchUnassignedMovies(): Promise<{ id: string; vector: number[] }[]> {
@@ -107,17 +104,17 @@ async function main() {
   const rows: { movie_id: string; cluster_id: string; distance: number }[] = [];
   for (const movie of unassigned) {
     const v = normalize(movie.vector);
-    const distances = clusters.map((c) => ({ cluster: c, d: dist(v, c.centroid) }));
-    distances.sort((a, b) => a.d - b.d);
+    const distances = clusters
+      .map((c) => ({ cluster: c, d: dist(v, c.centroid) }))
+      .sort((a, b) => a.d - b.d);
 
-    // Native: nearest, unconditionally -- every movie gets at least one.
-    rows.push({ movie_id: movie.id, cluster_id: distances[0].cluster.id, distance: distances[0].d });
+    const nativeDistance = distances[0].d;
+    const qualifying = distances
+      .slice(0, MAX_CLUSTERS_PER_MOVIE)
+      .filter((x, idx) => idx === 0 || x.d <= nativeDistance * SECONDARY_MULTIPLIER);
 
-    // Secondary: any other cluster this movie falls within the radius of,
-    // same rule as cluster-movies.ts, capped the same way.
-    const secondary = distances.slice(1).filter((x) => x.d <= x.cluster.radius).slice(0, MAX_SECONDARY_CLUSTERS);
-    for (const s of secondary) {
-      rows.push({ movie_id: movie.id, cluster_id: s.cluster.id, distance: s.d });
+    for (const q of qualifying) {
+      rows.push({ movie_id: movie.id, cluster_id: q.cluster.id, distance: q.d });
     }
   }
 
