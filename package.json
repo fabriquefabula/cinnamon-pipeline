@@ -6,7 +6,8 @@
   "scripts": {
     "ingest": "tsx ingest.ts",
     "cluster-movies": "tsx cluster-movies.ts",
-    "assign-movie-clusters": "tsx assign-movie-clusters.ts"
+    "assign-movie-clusters": "tsx assign-movie-clusters.ts",
+    "cluster-keywords": "tsx cluster-keywords.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
