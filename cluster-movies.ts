@@ -1,21 +1,36 @@
 // Full theme-cluster discovery: k-means over every scored movie's
-// essence_vector, adaptive per-cluster radius so a movie can land in more
-// than one cluster (not just its single nearest), then one LLM call per
-// cluster to name it from its actual members' essence summaries.
+// essence_vector, then one LLM call per cluster to name it from its
+// actual members' essence summaries. A movie can land in up to 4
+// clusters, not just its nearest.
 //
 // Run via workflow_dispatch, not scheduled -- this redefines the whole
 // cluster taxonomy (centroids can shift, cluster count/identity can
-// change), which is a bigger decision than the weekly incremental script
+// change), which is a bigger decision than the daily incremental script
 // (assign-movie-clusters.ts) should make unattended. Re-run by hand as
 // the catalog grows enough to warrant it.
 //
-// Verified before writing this for real: k-means/radius logic smoke-
-// tested against synthetic well-separated data (100% correct recovery of
-// 3 known groups) since this sandbox has no network to test end-to-end
-// against Supabase directly; dimension order for essence_vector confirmed
-// against cinnamon-scoring/prompt.ts (not needed by this script itself,
-// since it clusters on raw vector distance and labels from essence_summary
-// rather than individual dimension values).
+// Secondary-cluster eligibility (v2, replacing the original radius
+// approach): a movie's 2nd/3rd/4th-nearest cluster qualifies if its
+// distance is within SECONDARY_MULTIPLIER times THIS MOVIE'S OWN best
+// (native) distance -- movie-relative, not tied to a per-cluster
+// percentile. The original version used each cluster's own internal
+// spread as the radius, which turned out to be unstable here: the 200
+// clusters sit close enough together in this space that a small
+// percentile change flipped results from ~77% of movies stuck at a
+// single cluster to 100% of movies maxed out at 4. Tested several
+// multiplier values against the live data before choosing 1.4 (real
+// spread: ~46%/25%/14%/16% across 1/2/3/4 clusters) -- see the
+// migration that first corrected this live (fix_cluster_assignments_
+// relative_distance) for the actual comparison.
+//
+// Verified before the original version of this script was written:
+// k-means/radius logic smoke-tested against synthetic well-separated
+// data (100% correct recovery of 3 known groups), since this sandbox has
+// no network to test end-to-end against Supabase directly; dimension
+// order for essence_vector confirmed against cinnamon-scoring/prompt.ts
+// (not needed by this script itself, since it clusters on raw vector
+// distance and labels from essence_summary rather than individual
+// dimension values).
 //
 // Required env vars: ANTHROPIC_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // Optional: DRY_RUN=true, K=<int> (default 200)
@@ -30,18 +45,11 @@ const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 const DRY_RUN = process.env.DRY_RUN === 'true';
 const K = process.env.K ? parseInt(process.env.K, 10) : 200;
 const KMEANS_MAX_ITERATIONS = 100;
-const RADIUS_PERCENTILE = 0.6; // how tight a cluster's "core" is, for secondary-assignment eligibility
-const MAX_SECONDARY_CLUSTERS = 3; // plus the native (nearest) one = 4 tonal clusters max
+const SECONDARY_MULTIPLIER = 1.4; // a secondary cluster qualifies if within this multiple of the movie's own native distance
+const MAX_CLUSTERS_PER_MOVIE = 4; // native + up to 3 secondary
 const LABEL_SAMPLE_SIZE = 25; // movies sampled per cluster for the naming call
 const LABEL_MODEL = 'claude-sonnet-5';
 const PAGE_SIZE = 1000;
-
-// Note on essence_vector's dimension order (cinnamon-scoring/prompt.ts
-// DIMENSIONS, verified directly, not assumed): this script never needs it.
-// k-means distances are valid regardless of which index means what, and
-// labeling uses essence_summary (self-describing) rather than reading
-// individual dimension values -- exactly to avoid depending on that order
-// being known correctly here too.
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -172,8 +180,7 @@ async function labelCluster(members: MovieRow[]): Promise<string> {
     model: LABEL_MODEL,
     max_tokens: 30,
     // No temperature param -- claude-sonnet-5 rejects it outright
-    // ("temperature is deprecated for this model"), confirmed via the
-    // first real run's error, not assumed up front.
+    // ("temperature is deprecated for this model").
     system:
       "You name real clusters of movies for a recommendation site's browse categories. These groupings came from clustering actual emotional/tonal data, not from a rule -- your job is only to describe what genuinely unites this specific group, in the group's own terms. Write ONE short, specific, evocative label, 2-5 words. Not a generic genre name, and not a mechanical adjective-plus-noun template applied the same way every time -- look at what these particular descriptions actually share and name that. Respond with only the label text: no quotes, no punctuation at the end, no explanation.",
     messages: [{ role: 'user', content: listing }],
@@ -181,12 +188,6 @@ async function labelCluster(members: MovieRow[]): Promise<string> {
 
   const text = response.content.find((b) => b.type === 'text');
   return text && 'text' in text ? text.text.trim() : 'Untitled Cluster';
-}
-
-function percentile(sorted: number[], p: number): number {
-  if (sorted.length === 0) return 0;
-  const idx = Math.min(sorted.length - 1, Math.floor(p * sorted.length));
-  return sorted[idx];
 }
 
 async function main() {
@@ -202,20 +203,8 @@ async function main() {
   console.log('Running k-means...');
   const { centroids, assignments } = kmeans(normalized, K);
 
-  // Native members per cluster, and each cluster's radius: the distance
-  // at RADIUS_PERCENTILE among its own native members. Used below to
-  // also invite non-native movies that sit within that same core zone,
-  // which is what lets a movie land in more than one tonal cluster.
   const nativeIndices: number[][] = Array.from({ length: K }, () => []);
   for (let i = 0; i < assignments.length; i++) nativeIndices[assignments[i]].push(i);
-
-  const radii: number[] = [];
-  for (let c = 0; c < K; c++) {
-    const dists = nativeIndices[c]
-      .map((i) => Math.sqrt(squaredDist(normalized[i], centroids[c])))
-      .sort((a, b) => a - b);
-    radii.push(percentile(dists, RADIUS_PERCENTILE));
-  }
 
   console.log('Labeling clusters via Claude (one call per cluster)...');
   const clusterIds: string[] = [];
@@ -226,7 +215,7 @@ async function main() {
       continue;
     }
     const label = DRY_RUN ? `[dry-run cluster ${c}]` : await labelCluster(members);
-    console.log(`Cluster ${c}: "${label}" (${members.length} native members, radius ${radii[c].toFixed(3)})`);
+    console.log(`Cluster ${c}: "${label}" (${members.length} native members)`);
 
     if (DRY_RUN) {
       clusterIds.push('');
@@ -238,7 +227,6 @@ async function main() {
       .insert({
         label,
         centroid: `[${centroids[c].join(',')}]`,
-        radius: radii[c],
         film_count: members.length,
       })
       .select('id')
@@ -252,26 +240,24 @@ async function main() {
     return;
   }
 
-  console.log('Computing assignments (native + secondary within radius, capped)...');
+  console.log(`Computing assignments (native + up to ${MAX_CLUSTERS_PER_MOVIE - 1} secondary, within ${SECONDARY_MULTIPLIER}x native distance)...`);
   const assignmentRows: { movie_id: string; cluster_id: string; distance: number }[] = [];
   for (let i = 0; i < movies.length; i++) {
-    const native = assignments[i];
-    if (!clusterIds[native]) continue;
-    assignmentRows.push({
-      movie_id: movies[i].id,
-      cluster_id: clusterIds[native],
-      distance: Math.sqrt(squaredDist(normalized[i], centroids[native])),
-    });
-
-    const secondary: { c: number; d: number }[] = [];
+    const distances: { c: number; d: number }[] = [];
     for (let c = 0; c < K; c++) {
-      if (c === native || !clusterIds[c]) continue;
-      const d = Math.sqrt(squaredDist(normalized[i], centroids[c]));
-      if (d <= radii[c]) secondary.push({ c, d });
+      if (!clusterIds[c]) continue;
+      distances.push({ c, d: Math.sqrt(squaredDist(normalized[i], centroids[c])) });
     }
-    secondary.sort((a, b) => a.d - b.d);
-    for (const s of secondary.slice(0, MAX_SECONDARY_CLUSTERS)) {
-      assignmentRows.push({ movie_id: movies[i].id, cluster_id: clusterIds[s.c], distance: s.d });
+    distances.sort((a, b) => a.d - b.d);
+    if (distances.length === 0) continue;
+
+    const nativeDistance = distances[0].d;
+    const qualifying = distances
+      .slice(0, MAX_CLUSTERS_PER_MOVIE)
+      .filter((x, idx) => idx === 0 || x.d <= nativeDistance * SECONDARY_MULTIPLIER);
+
+    for (const q of qualifying) {
+      assignmentRows.push({ movie_id: movies[i].id, cluster_id: clusterIds[q.c], distance: q.d });
     }
   }
 
