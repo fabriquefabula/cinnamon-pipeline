@@ -1,0 +1,31 @@
+name: Assign Movie Clusters (Incremental)
+
+on:
+  schedule:
+    # Daily at 11:00 UTC -- comfortably after both the weekly ingest
+    # (Sundays 09:00 UTC) and normal scoring-batch turnaround, and cheap
+    # enough (no LLM calls, just distance math against existing clusters)
+    # that running daily instead of trying to time it precisely is fine.
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (no DB writes)'
+        type: boolean
+        default: false
+
+jobs:
+  assign-movie-clusters:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run assign-movie-clusters
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
