@@ -101,6 +101,7 @@ async function fetchKeywordVocabulary(): Promise<string[]> {
       .select('keywords')
       .eq('scoring_status', 'scored')
       .not('keywords', 'is', null)
+      .order('id', { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) throw error;
     const page = data ?? [];
@@ -298,6 +299,18 @@ async function main() {
   }
 
   const vocabularyIndex = new Map(vocabulary.map((kw, i) => [kw, i]));
+
+  // This is a full re-cluster -- a new run with a different K (or just a
+  // different random init) produces a different grouping of the same
+  // keywords, so old rows can't coexist with new ones. Confirmed via a
+  // real run: re-running at a new K without this hit a primary-key
+  // violation ("hit-and-run" already existed from the prior K=200 run
+  // when this K=250 run tried to write it into a different group).
+  // keyword_group_members cascades from keyword_groups (on delete
+  // cascade), so deleting the groups is enough.
+  console.log("Clearing previous run's groups...");
+  const { error: clearError } = await supabase.from('keyword_groups').delete().not('id', 'is', null);
+  if (clearError) throw clearError;
 
   console.log('Writing groups and memberships...');
   for (const group of groupRows) {
