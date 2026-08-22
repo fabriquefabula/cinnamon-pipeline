@@ -37,6 +37,17 @@ const FORMAT_BLOCKLIST = [
   'movie business', 'compilation', 'edited from tv series', 'narration',
   'pov (point of view)', 'anthology', 'low budget', 'b movie', 'video nasty',
   'exploitation', 'pseudo-documentary', 'mockumentary style',
+  // Added after a real bad group surfaced them: "Film Genres And
+  // Formats" mixed these production/meta terms in with genuine content
+  // categories (road movie, mumblecore, independent film -- kept, real
+  // browsable styles) -- these specifically describe the film's
+  // PRODUCTION/format, not its content. Matters here specifically: these
+  // keywords are about to become "ungrouped" after the bad group was
+  // deleted, and without this update this script would re-embed and
+  // re-home them into some other group instead of excluding them.
+  'short film', 'film production', 'cinema history', 'partially lost film',
+  'experimental film', 'experimental cinema', 'filmed theater', 'filmmaking',
+  'movie set', 'tv show in film',
 ];
 
 const SENSITIVE_CONTENT_BLOCKLIST = [
@@ -118,13 +129,6 @@ async function fetchUngroupedKeywords(): Promise<string[]> {
     from += PAGE_SIZE;
   }
 
-  // Bug fixed here: this coverage check previously had no .range(), so
-  // it silently capped at Supabase's default 1000-row limit against a
-  // table that already has 3,600+ rows -- found and fixed alongside the
-  // identical mistake in refresh-new-recommendations.ts and
-  // assign-movie-clusters.ts (same root cause, three files). This script
-  // hadn't run in production yet, but would have hit the same failure
-  // mode on its first scheduled run.
   const already = new Set<string>();
   let efrom = 0;
   while (true) {
