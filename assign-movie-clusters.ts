@@ -7,6 +7,13 @@
 // schedule while cluster-movies.ts (which can reshape the whole
 // taxonomy) stays a manual, deliberate trigger.
 //
+// Also refreshes avg_vote_count/film_count on every cluster each run --
+// that value was only ever computed by hand twice (cluster creation, and
+// the ranking-bug fix) and nothing kept it current since, even though
+// vote_count drifts constantly and this same script adds new movies to
+// clusters daily. Folded in here rather than a separate job, since this
+// already runs daily and the recompute is a cheap aggregate.
+//
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // Optional: DRY_RUN=true
 
@@ -56,12 +63,6 @@ async function fetchClusters(): Promise<Cluster[]> {
 async function fetchUnassignedMovies(): Promise<{ id: string; vector: number[] }[]> {
   // Movies scored but not present in movie_cluster_assignments at all --
   // newly scored since the last run of either script.
-  //
-  // Bug fixed here: this coverage check previously had no .range(), so
-  // it silently capped at Supabase's default 1000-row limit against a
-  // table with 58,000+ rows -- almost every movie looked unassigned as a
-  // result, and the run then failed on primary-key collisions trying to
-  // re-insert assignments that already existed. Paginated properly now.
   const assignedIds = new Set<string>();
   let afrom = 0;
   while (true) {
@@ -110,41 +111,50 @@ async function main() {
 
   const unassigned = await fetchUnassignedMovies();
   console.log(`${unassigned.length} scored movies without a cluster assignment.`);
-  if (unassigned.length === 0) {
-    console.log('Nothing to do.');
-    return;
-  }
 
-  const rows: { movie_id: string; cluster_id: string; distance: number }[] = [];
-  for (const movie of unassigned) {
-    const v = normalize(movie.vector);
-    const distances = clusters
-      .map((c) => ({ cluster: c, d: dist(v, c.centroid) }))
-      .sort((a, b) => a.d - b.d);
+  if (unassigned.length > 0) {
+    const rows: { movie_id: string; cluster_id: string; distance: number }[] = [];
+    for (const movie of unassigned) {
+      const v = normalize(movie.vector);
+      const distances = clusters
+        .map((c) => ({ cluster: c, d: dist(v, c.centroid) }))
+        .sort((a, b) => a.d - b.d);
 
-    const nativeDistance = distances[0].d;
-    const qualifying = distances
-      .slice(0, MAX_CLUSTERS_PER_MOVIE)
-      .filter((x, idx) => idx === 0 || x.d <= nativeDistance * SECONDARY_MULTIPLIER);
+      const nativeDistance = distances[0].d;
+      const qualifying = distances
+        .slice(0, MAX_CLUSTERS_PER_MOVIE)
+        .filter((x, idx) => idx === 0 || x.d <= nativeDistance * SECONDARY_MULTIPLIER);
 
-    for (const q of qualifying) {
-      rows.push({ movie_id: movie.id, cluster_id: q.cluster.id, distance: q.d });
+      for (const q of qualifying) {
+        rows.push({ movie_id: movie.id, cluster_id: q.cluster.id, distance: q.d });
+      }
     }
+
+    console.log(`${rows.length} assignment rows to write.`);
+    if (!DRY_RUN) {
+      const WRITE_CHUNK = 1000;
+      for (let i = 0; i < rows.length; i += WRITE_CHUNK) {
+        const chunk = rows.slice(i, i + WRITE_CHUNK);
+        const { error } = await supabase.from('movie_cluster_assignments').insert(chunk);
+        if (error) throw error;
+        console.log(`  ${Math.min(i + WRITE_CHUNK, rows.length)}/${rows.length}`);
+      }
+    } else {
+      console.log('Dry run: nothing written.');
+    }
+  } else {
+    console.log('No new assignments needed.');
   }
 
-  console.log(`${rows.length} assignment rows to write (${unassigned.length} movies).`);
   if (DRY_RUN) {
-    console.log('Dry run: nothing written.');
+    console.log('Dry run: skipping popularity refresh.');
     return;
   }
 
-  const WRITE_CHUNK = 1000;
-  for (let i = 0; i < rows.length; i += WRITE_CHUNK) {
-    const chunk = rows.slice(i, i + WRITE_CHUNK);
-    const { error } = await supabase.from('movie_cluster_assignments').insert(chunk);
-    if (error) throw error;
-    console.log(`  ${Math.min(i + WRITE_CHUNK, rows.length)}/${rows.length}`);
-  }
+  console.log('Refreshing cluster popularity (avg_vote_count, film_count)...');
+  const { data: refreshed, error: refreshError } = await supabase.rpc('refresh_cluster_popularity');
+  if (refreshError) throw refreshError;
+  console.log(`Popularity refreshed for ${refreshed} clusters.`);
 
   console.log('Done.');
 }
