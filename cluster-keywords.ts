@@ -51,31 +51,49 @@ const FORMAT_BLOCKLIST = [
 
 // Real-world trauma/crime topics -- keywords in this category are
 // genuinely semantically related to each other (the clustering isn't
-// wrong to group them), which is exactly the problem: a real first run
+// wrong to group them), which is exactly the problem: a real run
 // produced a group labeled "Sexual Violence and Abuse" from rape and
 // revenge, human trafficking, sexual assault, domestic violence,
-// attempted rape, organ trafficking. Same judgment already applied by
-// hand in the earlier fingerprint-collection work (Holocaust,
-// trafficking, and similar never became a browsable "vibe" there either)
-// -- this just codifies it here too, so no group can form around this
-// content regardless of how tight the embedding cluster is. Deliberately
+// attempted rape, organ trafficking; a later run at a different K
+// produced a group containing "pedophile" mixed with unrelated adult-
+// content keywords, and another containing "underage sex" -- caught only
+// because "pedophile" doesn't contain the substring "pedophilia", which
+// is what the blocklist checked for at the time. Fixed here by using
+// "pedophil" (the shared root, catches pedophile/pedophilia/pedophiliac
+// in one pattern) and adding "underage sex" explicitly, and by switching
+// single-word patterns to word-boundary matching (below) so a root like
+// "rape" can't also false-match an unrelated word that happens to
+// contain it. Same judgment already applied by hand in the earlier
+// fingerprint-collection work -- this content never becomes a browsable
+// "vibe" regardless of how tight the embedding cluster is. Deliberately
 // narrower than a general profanity/content filter: fictional genre
-// intensity (violence, gore, torture as a horror descriptor) stays,
-// since horror/action audiences reasonably expect that framing; this
-// blocks real-world atrocity and abuse topics specifically.
+// intensity (violence, gore, torture as a horror descriptor) stays, and
+// "trafficking" is scoped to people-trafficking phrases specifically so
+// legitimate drug-trafficking crime-genre content (Traffic, Sicario,
+// and similar) isn't caught by a bare "trafficking" root.
 const SENSITIVE_CONTENT_BLOCKLIST = [
-  'holocaust', 'concentration camp', 'genocide', 'slavery', 'trafficking',
+  'holocaust', 'concentration camp', 'genocide', 'slavery',
+  'human trafficking', 'sex trafficking', 'organ trafficking', 'child trafficking',
   'war crimes', 'mass murder', 'hate crime', 'terrorism',
-  'child abuse', 'child murder', 'pedophilia',
+  'child abuse', 'child murder', 'pedophil', 'underage sex',
   'sexual abuse', 'sexual assault', 'sexual violence', 'rape',
   'domestic violence', 'suicide', 'incest',
 ];
 
 const BLOCKLIST_PATTERNS = [...FORMAT_BLOCKLIST, ...SENSITIVE_CONTENT_BLOCKLIST];
 
+// Multi-word phrases: substring match is safe (very low false-positive
+// risk, and needed since exact wording around a phrase varies). Single
+// words: matched at a word boundary instead, so a deliberately partial
+// root like "pedophil" still catches its suffixed forms, but a root like
+// "rape" doesn't also match an unrelated word that happens to contain it
+// (e.g. "grape") -- a real gap found and fixed together with the
+// pedophile/pedophilia one above, not assumed away.
 function isQualityKeyword(keyword: string): boolean {
   const k = keyword.toLowerCase();
-  return !BLOCKLIST_PATTERNS.some((p) => k.includes(p));
+  return !BLOCKLIST_PATTERNS.some((p) =>
+    p.includes(' ') ? k.includes(p) : new RegExp(`\\b${p}`).test(k),
+  );
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
