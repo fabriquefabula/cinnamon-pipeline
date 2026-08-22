@@ -39,7 +39,7 @@ const LABEL_SAMPLE_SIZE = 20;
 // Production/format/meta tags -- real TMDB keywords, but not a theme
 // worth clustering. Filtered out before embedding, so no group ever
 // forms around them.
-const BLOCKLIST_PATTERNS = [
+const FORMAT_BLOCKLIST = [
   'based on', 'sequel', 'prequel', 'remake', 'reboot', 'spin off', 'spin-off',
   'duringcreditsstinger', 'aftercreditsstinger', '3d animation', 'stop motion',
   'live action remake', 'silent film', 'black and white', 'archive footage',
@@ -48,6 +48,30 @@ const BLOCKLIST_PATTERNS = [
   'pov (point of view)', 'anthology', 'low budget', 'b movie', 'video nasty',
   'exploitation', 'pseudo-documentary', 'mockumentary style',
 ];
+
+// Real-world trauma/crime topics -- keywords in this category are
+// genuinely semantically related to each other (the clustering isn't
+// wrong to group them), which is exactly the problem: a real first run
+// produced a group labeled "Sexual Violence and Abuse" from rape and
+// revenge, human trafficking, sexual assault, domestic violence,
+// attempted rape, organ trafficking. Same judgment already applied by
+// hand in the earlier fingerprint-collection work (Holocaust,
+// trafficking, and similar never became a browsable "vibe" there either)
+// -- this just codifies it here too, so no group can form around this
+// content regardless of how tight the embedding cluster is. Deliberately
+// narrower than a general profanity/content filter: fictional genre
+// intensity (violence, gore, torture as a horror descriptor) stays,
+// since horror/action audiences reasonably expect that framing; this
+// blocks real-world atrocity and abuse topics specifically.
+const SENSITIVE_CONTENT_BLOCKLIST = [
+  'holocaust', 'concentration camp', 'genocide', 'slavery', 'trafficking',
+  'war crimes', 'mass murder', 'hate crime', 'terrorism',
+  'child abuse', 'child murder', 'pedophilia',
+  'sexual abuse', 'sexual assault', 'sexual violence', 'rape',
+  'domestic violence', 'suicide', 'incest',
+];
+
+const BLOCKLIST_PATTERNS = [...FORMAT_BLOCKLIST, ...SENSITIVE_CONTENT_BLOCKLIST];
 
 function isQualityKeyword(keyword: string): boolean {
   const k = keyword.toLowerCase();
