@@ -56,11 +56,25 @@ async function fetchClusters(): Promise<Cluster[]> {
 async function fetchUnassignedMovies(): Promise<{ id: string; vector: number[] }[]> {
   // Movies scored but not present in movie_cluster_assignments at all --
   // newly scored since the last run of either script.
-  const { data: assignedRows, error: e1 } = await supabase
-    .from('movie_cluster_assignments')
-    .select('movie_id');
-  if (e1) throw e1;
-  const assignedIds = new Set((assignedRows ?? []).map((r: any) => r.movie_id));
+  //
+  // Bug fixed here: this coverage check previously had no .range(), so
+  // it silently capped at Supabase's default 1000-row limit against a
+  // table with 58,000+ rows -- almost every movie looked unassigned as a
+  // result, and the run then failed on primary-key collisions trying to
+  // re-insert assignments that already existed. Paginated properly now.
+  const assignedIds = new Set<string>();
+  let afrom = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('movie_cluster_assignments')
+      .select('movie_id')
+      .range(afrom, afrom + PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = data ?? [];
+    for (const row of page as any[]) assignedIds.add(row.movie_id);
+    if (page.length < PAGE_SIZE) break;
+    afrom += PAGE_SIZE;
+  }
 
   const all: { id: string; vector: number[] }[] = [];
   let from = 0;
