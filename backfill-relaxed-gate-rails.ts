@@ -6,22 +6,26 @@
 // never had this bug, so they're untouched here -- no reason to redo
 // correct work.
 //
+// Chunking is ADAPTIVE, not a fixed size -- but the STARTING size
+// matters for efficiency, not just correctness. A real run started at
+// 250 (safe elsewhere, tested against refresh-recommendations.ts's
+// top-250-by-popularity movies) and spent most of its time on FAILED
+// attempts: 250->125->63->32->16, each failure burning a full 2-minute
+// timeout before even beginning the retry. After 2+ hours it had only
+// gotten through 37.8% of the first of three rails. Starting at 20
+// (close to where chunks were actually succeeding in that run) and
+// lowering net_size (this population doesn't need as wide a candidate
+// search anyway -- it's specifically the movies that had too FEW
+// matches, so casting a wider net per movie wasn't buying anything)
+// should avoid most of that wasted time. Adaptive splitting stays as a
+// safety net for whatever's still slow at this size.
+//
 // "Affected" = fewer than 10 results in ANY of the 3 fixed rails --
 // checked directly against the live data before writing this (26,056
-// movies matched), not assumed to be a small cleanup.
-//
-// Chunking is ADAPTIVE, not a fixed size. A real run at the fixed size
-// that worked fine elsewhere (250, tested against the top-250-by-
-// popularity movies for refresh-recommendations.ts) timed out here on
-// the very first chunk. Root cause: this script's population isn't a
-// random sample -- it's specifically the movies that had too FEW
-// matches under the old strict gate, which skews toward rare genres and
-// sparse keyword lists, and those make the candidate-search subqueries
-// work harder per movie than an average popular title does. Rather than
-// guess a new fixed number for a population that can't be characterized
-// in advance, a chunk that times out gets split in half and retried;
-// this converges on whatever size is actually safe for whichever movies
-// are in it.
+// movies matched), not assumed to be a small cleanup. Re-checked fresh
+// on every run, so canceling and restarting after a partial run doesn't
+// redo already-completed work -- whatever chunks succeeded before are
+// no longer "affected" by the time this re-queries.
 //
 // This is a one-time cleanup, not an ongoing automation -- no scheduled
 // workflow, run once by hand and this file can be deleted after.
@@ -34,9 +38,9 @@ const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const TOP_K = 10;
-const NET_SIZE = 300;
-const INITIAL_CHUNK_SIZE = 250; // starting point, not assumed safe -- see runChunk
-const MIN_CHUNK_SIZE = 10; // below this, a timeout means the movie(s) themselves are the problem, not the batch size
+const NET_SIZE = 150; // reduced from 300 -- smaller per-movie candidate pool for a population that doesn't need a wide search
+const INITIAL_CHUNK_SIZE = 20; // reduced from 250 -- close to where chunks were actually succeeding in production, avoids repeated expensive timeout-then-split rounds
+const MIN_CHUNK_SIZE = 5; // below this, a timeout means the movie(s) themselves are the problem, not the batch size
 const INCOMPLETE_THRESHOLD = 10; // fewer than this in a fixed rail = affected
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -179,7 +183,9 @@ async function main() {
       const chunk = movieIds.slice(i, i + INITIAL_CHUNK_SIZE);
       const processed = await runChunk(rail, chunk, failedMovieIds);
       totalProcessed += processed;
-      console.log(`  progress: ${Math.min(i + INITIAL_CHUNK_SIZE, movieIds.length)}/${movieIds.length} attempted, ${totalProcessed} processed so far`);
+      if ((i / INITIAL_CHUNK_SIZE) % 20 === 0) {
+        console.log(`  progress: ${Math.min(i + INITIAL_CHUNK_SIZE, movieIds.length)}/${movieIds.length} attempted, ${totalProcessed} processed so far`);
+      }
     }
     console.log(`${rail.name} done: ${totalProcessed} processed.`);
     if (failedMovieIds.length > 0) {
