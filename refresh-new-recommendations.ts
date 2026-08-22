@@ -46,14 +46,31 @@ const RAILS: RailConfig[] = [
 ];
 
 async function fetchMoviesWithoutNeighbors(): Promise<string[]> {
-  const { data: withNeighbors, error: e1 } = await supabase
-    .from('movie_neighbors')
-    .select('source_movie_id');
-  if (e1) throw e1;
-  const covered = new Set((withNeighbors ?? []).map((r: any) => r.source_movie_id));
+  const PAGE_SIZE = 1000;
+
+  // Bug fixed here: this query previously had no .range() at all, so it
+  // silently capped at Supabase's default 1000-row limit against a
+  // table with 1.7M+ rows -- almost every movie looked "uncovered" as a
+  // result (44,499 flagged in a real run instead of the actual ~1,832),
+  // and the run then failed trying to recompute the whole catalog.
+  // Paginated properly now, matching the pattern the second query in
+  // this function already used correctly -- should have been consistent
+  // from the start.
+  const covered = new Set<string>();
+  let cfrom = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('movie_neighbors')
+      .select('source_movie_id')
+      .range(cfrom, cfrom + PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = data ?? [];
+    for (const row of page as any[]) covered.add(row.source_movie_id);
+    if (page.length < PAGE_SIZE) break;
+    cfrom += PAGE_SIZE;
+  }
 
   const missing: string[] = [];
-  const PAGE_SIZE = 1000;
   let from = 0;
   while (true) {
     const { data, error } = await supabase
