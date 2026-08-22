@@ -24,6 +24,7 @@ const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 const EMBED_MODEL = 'voyage-4';
 const EMBED_DIMENSION = 1024;
 const EMBED_BATCH_SIZE = 128;
+const PAGE_SIZE = 1000;
 
 // Same blocklist as cluster-keywords.ts -- a new keyword still has to
 // pass the same format/meta and sensitive-content filters before it's
@@ -99,7 +100,6 @@ async function embedBatchWithRetry(batch: string[], attempt = 1): Promise<{ embe
 
 async function fetchUngroupedKeywords(): Promise<string[]> {
   const counts = new Map<string, number>();
-  const PAGE_SIZE = 1000;
   let from = 0;
   while (true) {
     const { data, error } = await supabase
@@ -118,9 +118,26 @@ async function fetchUngroupedKeywords(): Promise<string[]> {
     from += PAGE_SIZE;
   }
 
-  const { data: existing, error: existingErr } = await supabase.from('keyword_group_members').select('keyword');
-  if (existingErr) throw existingErr;
-  const already = new Set((existing ?? []).map((r: any) => r.keyword));
+  // Bug fixed here: this coverage check previously had no .range(), so
+  // it silently capped at Supabase's default 1000-row limit against a
+  // table that already has 3,600+ rows -- found and fixed alongside the
+  // identical mistake in refresh-new-recommendations.ts and
+  // assign-movie-clusters.ts (same root cause, three files). This script
+  // hadn't run in production yet, but would have hit the same failure
+  // mode on its first scheduled run.
+  const already = new Set<string>();
+  let efrom = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('keyword_group_members')
+      .select('keyword')
+      .range(efrom, efrom + PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = data ?? [];
+    for (const row of page as any[]) already.add(row.keyword);
+    if (page.length < PAGE_SIZE) break;
+    efrom += PAGE_SIZE;
+  }
 
   return Array.from(counts.keys()).filter((kw) => !already.has(kw) && isQualityKeyword(kw));
 }
