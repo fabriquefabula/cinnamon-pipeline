@@ -1,0 +1,26 @@
+name: Refresh New Recommendations (Incremental)
+
+on:
+  schedule:
+    # Daily at 13:00 UTC -- after scoring-collect's every-3-hours polling
+    # has had chances to pick up newly-completed batches, and after
+    # assign-movie-clusters (11:00 UTC) so a new movie's tonal cluster
+    # exists before its recommendations are computed (cluster_score in
+    # the rail functions reads movie_cluster_assignments).
+    - cron: '0 13 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  refresh-new-recommendations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run refresh-new-recommendations
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

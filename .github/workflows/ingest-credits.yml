@@ -1,6 +1,12 @@
 name: Ingest Credits
 
 on:
+  schedule:
+    # Sundays at 10:00 UTC -- one hour after weekly ingestion (09:00), so
+    # new movies exist to fetch credits for. Independent of scoring-submit
+    # (10:30) -- credits and scoring eligibility don't depend on each
+    # other, both only need ingestion to have run first.
+    - cron: '0 10 * * 0'
   workflow_dispatch:
     inputs:
       dry_run:

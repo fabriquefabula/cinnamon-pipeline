@@ -1,0 +1,24 @@
+name: Assign Keyword Groups (Incremental)
+
+on:
+  schedule:
+    # Weekly, Sunday 12:00 UTC -- after weekly ingestion (09:00) has had
+    # time to bring in new movies and their keywords.
+    - cron: '0 12 * * 0'
+  workflow_dispatch: {}
+
+jobs:
+  assign-keyword-groups:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run assign-keyword-groups
+        env:
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
