@@ -124,6 +124,22 @@ async function processMovie(movie: {
     }
   }
 
+  // movies.director_credits is the fast-path JSONB column movie cards
+  // actually read (avoids a join for every card render) -- this script
+  // only wrote movie_credits before, leaving that column empty for any
+  // movie it processed. Real gap, not hypothetical: caught before this
+  // ever shipped to a real weekly run.
+  if (directors.length > 0) {
+    const directorCredits = directors
+      .map((d) => ({ id: personIdByTmdb.get(d.id), name: d.name }))
+      .filter((d) => d.id);
+    const { error: dcError } = await supabase
+      .from('movies')
+      .update({ director_credits: directorCredits })
+      .eq('id', movie.id);
+    if (dcError) console.error(`director_credits update failed for movie ${movie.id}:`, dcError.message);
+  }
+
   return { cast: topCast.length, crew: directors.length };
 }
 
