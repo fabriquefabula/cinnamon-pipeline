@@ -98,29 +98,56 @@ async function embedKeywords(keywords: string[]): Promise<number[][]> {
   const embeddings: number[][] = [];
   for (let i = 0; i < keywords.length; i += EMBED_BATCH_SIZE) {
     const batch = keywords.slice(i, i + EMBED_BATCH_SIZE);
-    const res = await fetch('https://api.voyageai.com/v1/embeddings', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${VOYAGE_API_KEY}`,
-      },
-      body: JSON.stringify({
-        input: batch,
-        model: EMBED_MODEL,
-        input_type: 'document',
-        output_dimension: EMBED_DIMENSION,
-      }),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Voyage embeddings request failed: ${res.status} ${text}`);
-    }
-    const json = (await res.json()) as { data: { embedding: number[]; index: number }[] };
-    const sorted = json.data.sort((a, b) => a.index - b.index);
+    const sorted = await embedBatchWithRetry(batch);
     for (const d of sorted) embeddings.push(d.embedding);
     console.log(`Embedded ${Math.min(i + EMBED_BATCH_SIZE, keywords.length)}/${keywords.length} keywords`);
   }
   return embeddings;
+}
+
+// Retries on 429 with backoff instead of assuming the account has
+// standard rate limits -- confirmed via a real run that accounts without
+// a payment method on file get capped at 3 requests/minute, which a
+// tight back-to-back loop blows through in seconds. This makes the
+// script work correctly regardless of which tier the account is on,
+// rather than requiring the payment method to be added first.
+async function embedBatchWithRetry(
+  batch: string[],
+  attempt = 1,
+): Promise<{ embedding: number[]; index: number }[]> {
+  const MAX_ATTEMPTS = 8;
+  const res = await fetch('https://api.voyageai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${VOYAGE_API_KEY}`,
+    },
+    body: JSON.stringify({
+      input: batch,
+      model: EMBED_MODEL,
+      input_type: 'document',
+      output_dimension: EMBED_DIMENSION,
+    }),
+  });
+
+  if (res.status === 429) {
+    if (attempt >= MAX_ATTEMPTS) throw new Error(`Voyage still rate-limiting after ${MAX_ATTEMPTS} attempts, giving up.`);
+    // No payment method on file = 3 RPM, so a flat 21s wait clears one
+    // request-slot; exponential backoff on top in case the real limit is
+    // tighter than documented or something else is throttling too.
+    const waitMs = 21_000 * attempt;
+    console.log(`Rate limited (429), waiting ${Math.round(waitMs / 1000)}s before retry ${attempt + 1}/${MAX_ATTEMPTS}...`);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return embedBatchWithRetry(batch, attempt + 1);
+  }
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Voyage embeddings request failed: ${res.status} ${text}`);
+  }
+
+  const json = (await res.json()) as { data: { embedding: number[]; index: number }[] };
+  return json.data.sort((a, b) => a.index - b.index);
 }
 
 function normalize(v: number[]): number[] {
