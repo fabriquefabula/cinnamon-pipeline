@@ -10,6 +10,19 @@
 // checked directly against the live data before writing this (26,056
 // movies matched), not assumed to be a small cleanup.
 //
+// Chunking is ADAPTIVE, not a fixed size. A real run at the fixed size
+// that worked fine elsewhere (250, tested against the top-250-by-
+// popularity movies for refresh-recommendations.ts) timed out here on
+// the very first chunk. Root cause: this script's population isn't a
+// random sample -- it's specifically the movies that had too FEW
+// matches under the old strict gate, which skews toward rare genres and
+// sparse keyword lists, and those make the candidate-search subqueries
+// work harder per movie than an average popular title does. Rather than
+// guess a new fixed number for a population that can't be characterized
+// in advance, a chunk that times out gets split in half and retried;
+// this converges on whatever size is actually safe for whichever movies
+// are in it.
+//
 // This is a one-time cleanup, not an ongoing automation -- no scheduled
 // workflow, run once by hand and this file can be deleted after.
 //
@@ -22,7 +35,8 @@ const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const TOP_K = 10;
 const NET_SIZE = 300;
-const CHUNK_SIZE = 250;
+const INITIAL_CHUNK_SIZE = 250; // starting point, not assumed safe -- see runChunk
+const MIN_CHUNK_SIZE = 10; // below this, a timeout means the movie(s) themselves are the problem, not the batch size
 const INCOMPLETE_THRESHOLD = 10; // fewer than this in a fixed rail = affected
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -102,6 +116,51 @@ async function fetchAffectedMovieIds(): Promise<string[]> {
   return affected;
 }
 
+function isTimeoutError(message: string): boolean {
+  return message.includes('statement timeout') || message.includes('57014');
+}
+
+// Tries a chunk; on timeout, splits it in half and retries each half
+// (recursively, so a persistently slow chunk keeps shrinking until it
+// either succeeds or hits MIN_CHUNK_SIZE). Movies that still fail at
+// MIN_CHUNK_SIZE are logged and skipped rather than aborting the whole
+// run -- a handful of genuinely pathological cases shouldn't block
+// backfilling the other ~25,000 movies that are actually fine.
+async function runChunk(
+  rail: RailConfig,
+  movieIds: string[],
+  failedMovieIds: string[],
+): Promise<number> {
+  const { data, error } = await supabase.rpc(rail.rpcName, {
+    top_k: TOP_K,
+    net_size: NET_SIZE,
+    movie_limit: null,
+    movie_offset: 0,
+    after_vote_count: null,
+    after_id: null,
+    p_specific_ids: movieIds,
+    ...rail.extraArgs,
+  });
+
+  if (!error) return data as number;
+
+  if (isTimeoutError(error.message) && movieIds.length > MIN_CHUNK_SIZE) {
+    const mid = Math.ceil(movieIds.length / 2);
+    console.log(`  timeout on ${movieIds.length} movies, splitting into ${mid} + ${movieIds.length - mid} and retrying...`);
+    const first = await runChunk(rail, movieIds.slice(0, mid), failedMovieIds);
+    const second = await runChunk(rail, movieIds.slice(mid), failedMovieIds);
+    return first + second;
+  }
+
+  if (isTimeoutError(error.message)) {
+    console.log(`  giving up on ${movieIds.length} movie(s) at minimum chunk size (still timing out): ${movieIds.join(', ')}`);
+    failedMovieIds.push(...movieIds);
+    return 0;
+  }
+
+  throw new Error(`${rail.rpcName} failed on a non-timeout error: ${error.message}`);
+}
+
 async function main() {
   console.log('Finding movies affected by the overly-strict gate bug...');
   const movieIds = await fetchAffectedMovieIds();
@@ -113,25 +172,19 @@ async function main() {
   }
 
   for (const rail of RAILS) {
-    console.log(`\n=== ${rail.name} (${movieIds.length} movies, chunks of ${CHUNK_SIZE}) ===`);
+    console.log(`\n=== ${rail.name} (${movieIds.length} movies, starting chunk size ${INITIAL_CHUNK_SIZE}) ===`);
     let totalProcessed = 0;
-    for (let i = 0; i < movieIds.length; i += CHUNK_SIZE) {
-      const chunk = movieIds.slice(i, i + CHUNK_SIZE);
-      const { data, error } = await supabase.rpc(rail.rpcName, {
-        top_k: TOP_K,
-        net_size: NET_SIZE,
-        movie_limit: null,
-        movie_offset: 0,
-        after_vote_count: null,
-        after_id: null,
-        p_specific_ids: chunk,
-        ...rail.extraArgs,
-      });
-      if (error) throw new Error(`${rail.rpcName} failed on chunk starting at ${i}: ${error.message}`);
-      totalProcessed += data as number;
-      console.log(`  chunk ${Math.floor(i / CHUNK_SIZE) + 1}: +${data} (total ${totalProcessed}/${movieIds.length})`);
+    const failedMovieIds: string[] = [];
+    for (let i = 0; i < movieIds.length; i += INITIAL_CHUNK_SIZE) {
+      const chunk = movieIds.slice(i, i + INITIAL_CHUNK_SIZE);
+      const processed = await runChunk(rail, chunk, failedMovieIds);
+      totalProcessed += processed;
+      console.log(`  progress: ${Math.min(i + INITIAL_CHUNK_SIZE, movieIds.length)}/${movieIds.length} attempted, ${totalProcessed} processed so far`);
     }
     console.log(`${rail.name} done: ${totalProcessed} processed.`);
+    if (failedMovieIds.length > 0) {
+      console.log(`${rail.name}: ${failedMovieIds.length} movie(s) still timed out even at minimum chunk size: ${failedMovieIds.join(', ')}`);
+    }
   }
 
   console.log('\nDone.');
