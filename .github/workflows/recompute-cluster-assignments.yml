@@ -1,0 +1,29 @@
+name: Recompute Cluster Assignments (One-Time)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (show projected distribution, write nothing)'
+        required: false
+        default: 'true'
+      multiplier:
+        description: 'Secondary cluster multiplier (default 1.6)'
+        required: false
+
+jobs:
+  recompute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run recompute-cluster-assignments
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MULTIPLIER: ${{ github.event.inputs.multiplier }}

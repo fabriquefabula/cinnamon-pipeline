@@ -11,7 +11,8 @@
     "refresh-recommendations": "tsx refresh-recommendations.ts",
     "refresh-new-recommendations": "tsx refresh-new-recommendations.ts",
     "assign-keyword-groups": "tsx assign-keyword-groups.ts",
-    "backfill-relaxed-gate-rails": "tsx backfill-relaxed-gate-rails.ts"
+    "backfill-relaxed-gate-rails": "tsx backfill-relaxed-gate-rails.ts",
+    "recompute-cluster-assignments": "tsx recompute-cluster-assignments.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
