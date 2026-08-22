@@ -47,6 +47,14 @@ const FORMAT_BLOCKLIST = [
   'movie business', 'compilation', 'edited from tv series', 'narration',
   'pov (point of view)', 'anthology', 'low budget', 'b movie', 'video nasty',
   'exploitation', 'pseudo-documentary', 'mockumentary style',
+  // Added after a real bad group surfaced them: "Film Genres And
+  // Formats" mixed these production/meta terms in with genuine content
+  // categories (road movie, mumblecore, independent film -- kept, real
+  // browsable styles) -- these specifically describe the film's
+  // PRODUCTION/format, not its content.
+  'short film', 'film production', 'cinema history', 'partially lost film',
+  'experimental film', 'experimental cinema', 'filmed theater', 'filmmaking',
+  'movie set', 'tv show in film',
 ];
 
 // Real-world trauma/crime topics -- keywords in this category are
