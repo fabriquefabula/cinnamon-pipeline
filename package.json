@@ -14,7 +14,8 @@
     "backfill-relaxed-gate-rails": "tsx backfill-relaxed-gate-rails.ts",
     "recompute-cluster-assignments": "tsx recompute-cluster-assignments.ts",
     "generate-collection-descriptions": "tsx generate-collection-descriptions.ts",
-    "generate-display-labels": "tsx generate-display-labels.ts"
+    "generate-display-labels": "tsx generate-display-labels.ts",
+    "fix-untitled-groups": "tsx fix-untitled-groups.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
