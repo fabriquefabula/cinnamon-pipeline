@@ -27,4 +27,4 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
-          MULTIPLIER: ${{ github.event.inputs.limit }}
+          LIMIT: ${{ github.event.inputs.limit }}
