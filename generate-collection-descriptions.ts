@@ -104,7 +104,14 @@ async function generateDescription(label: string, sample: string[]): Promise<str
 
   const response = await anthropic.messages.create({
     model: DESCRIPTION_MODEL,
-    max_tokens: 150,
+    // Was 150 -- confirmed via a real production check that this was
+    // systematically too tight: 422 of 445 live descriptions (94.8%)
+    // ended up truncated mid-sentence, not an occasional edge case. The
+    // prompt asks for specific, grounded detail rather than generic
+    // filler, and a genuinely specific 2-3 sentence description
+    // routinely runs past what 150 tokens covers. 300 gives real
+    // headroom without inviting rambling past 2-3 sentences.
+    max_tokens: 300,
     system:
       "You write a short intro (2-3 sentences) for a movie collection page on a recommendation site. The collection was discovered by clustering real movies -- its members share something real, not just a label. Ground what you write in the ACTUAL movies shown below, not in the label alone. Be specific: name a real pattern in tone, subject, or feeling that genuinely recurs across these particular movies. Do not restate the label as a sentence, do not use generic filler like \"if you enjoy X, you'll love these,\" and do not use bullet points. Respond with only the description text: no preamble, no quotes, no label repeated verbatim at the start.",
     messages: [{ role: 'user', content: `Collection label: ${label}\n\nSample movies:\n${sample.join('\n')}` }],
