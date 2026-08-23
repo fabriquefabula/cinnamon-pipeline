@@ -13,7 +13,8 @@
     "assign-keyword-groups": "tsx assign-keyword-groups.ts",
     "backfill-relaxed-gate-rails": "tsx backfill-relaxed-gate-rails.ts",
     "recompute-cluster-assignments": "tsx recompute-cluster-assignments.ts",
-    "generate-collection-descriptions": "tsx generate-collection-descriptions.ts"
+    "generate-collection-descriptions": "tsx generate-collection-descriptions.ts",
+    "generate-display-labels": "tsx generate-display-labels.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
