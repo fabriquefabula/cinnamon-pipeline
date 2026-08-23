@@ -74,6 +74,14 @@ async function sampleTonalClusterMovies(clusterId: string): Promise<string[]> {
     .map((m) => `- ${m.title}: ${m.essence_summary}`);
 }
 
+// Real production failure fixed here: this used to call supabase-js's
+// .overlaps('keywords', keywords), which serializes the JS array into a
+// raw Postgres array-literal string client-side ("{a,b,c}") without
+// properly quoting elements containing special characters. A keyword
+// group containing "rock 'n' roll" broke on the unescaped apostrophes:
+// "malformed array literal... Incorrectly quoted array element." Using
+// an RPC instead -- the array goes through as a real parameter, which
+// Postgres handles correctly regardless of what's inside the strings.
 async function sampleKeywordGroupMovies(groupId: string): Promise<string[]> {
   const { data: members, error: membersErr } = await supabase
     .from('keyword_group_members')
@@ -83,14 +91,12 @@ async function sampleKeywordGroupMovies(groupId: string): Promise<string[]> {
   const keywords = (members ?? []).map((m: any) => m.keyword);
   if (keywords.length === 0) return [];
 
-  const { data: movies, error: moviesErr } = await supabase
-    .from('movies')
-    .select('title, essence_summary, keywords')
-    .overlaps('keywords', keywords)
-    .not('essence_summary', 'is', null)
-    .limit(SAMPLE_SIZE);
+  const { data: movies, error: moviesErr } = await supabase.rpc('movies_by_keywords_sample', {
+    p_keywords: keywords,
+    p_limit: SAMPLE_SIZE,
+  });
   if (moviesErr) throw moviesErr;
-  return (movies ?? []).map((m: any) => `- ${m.title}: ${m.essence_summary}`);
+  return ((movies ?? []) as any[]).map((m) => `- ${m.title}: ${m.essence_summary}`);
 }
 
 async function generateDescription(label: string, sample: string[]): Promise<string | null> {
