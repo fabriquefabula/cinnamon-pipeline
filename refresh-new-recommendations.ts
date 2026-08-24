@@ -8,9 +8,7 @@
 //
 // Order is fixed and matters: closest_match, same_mood, darker_pick,
 // more_accessible, hidden_gem -- each excludes picks already used by the
-// ones before it. Chunked the same as refresh-recommendations.ts -- the
-// backlog isn't always small (checked before assuming otherwise: 1,832
-// movies were missing neighbors when this was written).
+// ones before it.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
@@ -21,7 +19,17 @@ const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const TOP_K = 10;
 const NET_SIZE = 300;
-const CHUNK_SIZE = 250; // same tested-safe size as refresh-recommendations.ts -- checked the real backlog before assuming this script could skip chunking (1,832 movies right now, well past a single safe call)
+// Was a fixed 250 with no retry -- a single chunk timeout threw
+// immediately and killed the ENTIRE run, abandoning every other chunk
+// even if they would have succeeded. That's the real reason the backlog
+// compounded from 1,832 (noted when this script was written) to 7,415:
+// every failed run made zero progress, and each week's newly-scored
+// movies piled onto an already-stuck backlog. Adaptive chunking instead,
+// same pattern already proven on backfill-relaxed-gate-rails.ts: halve
+// and retry on timeout, skip and log at the floor, keep moving instead
+// of aborting everything over one bad chunk.
+const INITIAL_CHUNK_SIZE = 100;
+const MIN_CHUNK_SIZE = 10;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -48,14 +56,6 @@ const RAILS: RailConfig[] = [
 async function fetchMoviesWithoutNeighbors(): Promise<string[]> {
   const PAGE_SIZE = 1000;
 
-  // Bug fixed here: this query previously had no .range() at all, so it
-  // silently capped at Supabase's default 1000-row limit against a
-  // table with 1.7M+ rows -- almost every movie looked "uncovered" as a
-  // result (44,499 flagged in a real run instead of the actual ~1,832),
-  // and the run then failed trying to recompute the whole catalog.
-  // Paginated properly now, matching the pattern the second query in
-  // this function already used correctly -- should have been consistent
-  // from the start.
   const covered = new Set<string>();
   let cfrom = 0;
   while (true) {
@@ -91,6 +91,45 @@ async function fetchMoviesWithoutNeighbors(): Promise<string[]> {
   return missing;
 }
 
+function isTimeoutError(message: string): boolean {
+  return /statement timeout/i.test(message);
+}
+
+// Recursively processes a chunk of movie ids for one rail. On a timeout,
+// halves the chunk and retries both halves instead of failing the whole
+// run. At MIN_CHUNK_SIZE, logs and skips rather than retrying forever --
+// a chunk that won't succeed even at the floor needs investigation, not
+// an infinite retry loop.
+async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
+  const { data, error } = await supabase.rpc(rail.rpcName, {
+    top_k: TOP_K,
+    net_size: NET_SIZE,
+    movie_limit: null,
+    movie_offset: 0,
+    after_vote_count: null,
+    after_id: null,
+    p_specific_ids: ids,
+    ...rail.extraArgs,
+  });
+
+  if (!error) return data as number;
+
+  if (isTimeoutError(error.message) && ids.length > MIN_CHUNK_SIZE) {
+    const mid = Math.ceil(ids.length / 2);
+    console.log(`  timeout on chunk of ${ids.length} -- splitting into ${mid} + ${ids.length - mid}`);
+    const first = await processChunk(rail, ids.slice(0, mid));
+    const second = await processChunk(rail, ids.slice(mid));
+    return first + second;
+  }
+
+  if (isTimeoutError(error.message)) {
+    console.log(`  SKIP: chunk of ${ids.length} still timing out at the floor -- ids: ${ids.slice(0, 3).join(', ')}...`);
+    return 0;
+  }
+
+  throw new Error(`${rail.rpcName} failed on a non-timeout error: ${error.message}`);
+}
+
 async function main() {
   console.log('Finding scored movies with no recommendation rails yet...');
   const movieIds = await fetchMoviesWithoutNeighbors();
@@ -102,23 +141,13 @@ async function main() {
   }
 
   for (const rail of RAILS) {
-    console.log(`\n=== ${rail.name} (${movieIds.length} movies, chunks of ${CHUNK_SIZE}) ===`);
+    console.log(`\n=== ${rail.name} (${movieIds.length} movies, starting chunks of ${INITIAL_CHUNK_SIZE}) ===`);
     let totalProcessed = 0;
-    for (let i = 0; i < movieIds.length; i += CHUNK_SIZE) {
-      const chunk = movieIds.slice(i, i + CHUNK_SIZE);
-      const { data, error } = await supabase.rpc(rail.rpcName, {
-        top_k: TOP_K,
-        net_size: NET_SIZE,
-        movie_limit: null,
-        movie_offset: 0,
-        after_vote_count: null,
-        after_id: null,
-        p_specific_ids: chunk,
-        ...rail.extraArgs,
-      });
-      if (error) throw new Error(`${rail.rpcName} failed on chunk starting at ${i}: ${error.message}`);
-      totalProcessed += data as number;
-      console.log(`  chunk ${Math.floor(i / CHUNK_SIZE) + 1}: +${data} (total ${totalProcessed}/${movieIds.length})`);
+    for (let i = 0; i < movieIds.length; i += INITIAL_CHUNK_SIZE) {
+      const chunk = movieIds.slice(i, i + INITIAL_CHUNK_SIZE);
+      const processed = await processChunk(rail, chunk);
+      totalProcessed += processed;
+      console.log(`  chunk starting at ${i}: +${processed} (total ${totalProcessed}/${movieIds.length})`);
     }
     console.log(`${rail.name} done: ${totalProcessed} processed.`);
   }
