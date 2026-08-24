@@ -28,7 +28,17 @@ const NET_SIZE = 300;
 // same pattern already proven on backfill-relaxed-gate-rails.ts: halve
 // and retry on timeout, skip and log at the floor, keep moving instead
 // of aborting everything over one bad chunk.
-const INITIAL_CHUNK_SIZE = 100;
+//
+// INITIAL_CHUNK_SIZE was 100 -- confirmed via a real run that this was
+// still too high: every 100-chunk cascaded through 100->50->50->25->25
+// (3 wasted timeout-and-split round trips) before finally succeeding,
+// and even 25 occasionally still timed out. The broadened cluster_score
+// added to darker_pick/more_accessible (checking keyword-group overlap
+// via an extra unnest+join per candidate, not just tonal clusters) made
+// every rail computation more expensive than when 100 was chosen. 20
+// gives real margin below the observed failure threshold rather than
+// splitting the difference.
+const INITIAL_CHUNK_SIZE = 20;
 const MIN_CHUNK_SIZE = 10;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
