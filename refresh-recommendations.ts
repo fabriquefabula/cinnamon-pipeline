@@ -17,7 +17,15 @@ import { createClient } from '@supabase/supabase-js';
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
-const CHUNK_SIZE = 250; // movies per RPC call -- tested directly against the live statement_timeout (2min): 250 and 350 succeeded, 500 did not. Using 250 for real margin across the whole catalog, not just the popular titles tested against.
+// Re-measured directly against the live statement_timeout (2min):
+// compute_closest_match on 250 movies took ~80s on its own, with no
+// safety margin once real network/pooling overhead is added on top --
+// which is exactly what the last run hit (timed out on chunk 0 at 250).
+// The compute_* functions also now join movie_recurrence_penalty
+// (added to dampen hub movies that were dominating every rail), which
+// adds real cost per candidate. 100 gives roughly 3x margin at the
+// measured per-movie rate instead of running right at the edge.
+const CHUNK_SIZE = 100;
 const TOP_K = 10;
 const NET_SIZE = 300;
 
