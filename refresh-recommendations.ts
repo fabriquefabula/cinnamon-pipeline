@@ -1,9 +1,14 @@
 // Refreshes all 5 recommendation rails (movie_neighbors) across the
-// full catalog by calling the compute_* Postgres functions in chunks --
-// a single call across all ~45k movies times out (confirmed directly:
-// even 500 movies per call exceeded the query interface's timeout), so
-// this mirrors the resumable-batch design the SQL functions already
-// have (after_vote_count/after_id) rather than fighting it.
+// full catalog by calling the compute_* Postgres functions in chunks,
+// adaptively sized -- ported directly from refresh-new-recommendations.ts,
+// which already solved this same timeout problem for the incremental
+// case. A fixed chunk size was tried twice here (250, then 100) and
+// both failed on chunk 0: this script processes movies highest-vote_count
+// first, which is also the most expensive case (broad genre/keyword
+// overlap with much of the rest of the catalog), and the incremental
+// script needed to go as low as 20 even on arbitrary, not
+// worst-case-first, movies. A fixed number was never going to hold up
+// here; halve-on-timeout and skip-at-floor does.
 //
 // Order matters and is fixed: closest_match, same_mood, darker_pick,
 // more_accessible, hidden_gem -- each rail excludes picks already used
@@ -17,17 +22,10 @@ import { createClient } from '@supabase/supabase-js';
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
-// Re-measured directly against the live statement_timeout (2min):
-// compute_closest_match on 250 movies took ~80s on its own, with no
-// safety margin once real network/pooling overhead is added on top --
-// which is exactly what the last run hit (timed out on chunk 0 at 250).
-// The compute_* functions also now join movie_recurrence_penalty
-// (added to dampen hub movies that were dominating every rail), which
-// adds real cost per candidate. 100 gives roughly 3x margin at the
-// measured per-movie rate instead of running right at the edge.
-const CHUNK_SIZE = 100;
 const TOP_K = 10;
 const NET_SIZE = 300;
+const INITIAL_CHUNK_SIZE = 50;
+const MIN_CHUNK_SIZE = 10;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   db: { schema: 'public' },
@@ -53,76 +51,89 @@ const RAILS: RailConfig[] = [
   { name: 'hidden_gem', rpcName: 'compute_hidden_gem', extraArgs: { vote_floor: 250, vote_ceiling: 5000 } },
 ];
 
-// Same ordering the SQL functions paginate by internally (vote_count
-// desc, id) -- fetched independently here just to know each chunk's
-// cursor boundary, not to duplicate the actual scoring work.
-async function fetchOrderedMovieIds(): Promise<{ id: string; vote_count: number }[]> {
-  const all: { id: string; vote_count: number }[] = [];
+// Same ordering the SQL functions used to paginate by internally
+// (vote_count desc, id) -- now fetched fully up front so the whole list
+// can be sliced into adaptively-sized chunks by id, same as the
+// incremental script does.
+async function fetchOrderedMovieIds(): Promise<string[]> {
+  const all: string[] = [];
   const PAGE_SIZE = 1000;
   let from = 0;
   while (true) {
     const { data, error } = await supabase
       .from('movies')
-      .select('id, vote_count')
+      .select('id')
       .not('essence_vector', 'is', null)
       .order('vote_count', { ascending: false })
       .order('id', { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) throw error;
     const page = data ?? [];
-    all.push(...(page as any[]));
+    all.push(...(page as any[]).map((r) => r.id));
     if (page.length < PAGE_SIZE) break;
     from += PAGE_SIZE;
   }
   return all;
 }
 
-async function runRail(rail: RailConfig, orderedMovies: { id: string; vote_count: number }[]) {
-  console.log(`\n=== ${rail.name} (${orderedMovies.length} movies, chunks of ${CHUNK_SIZE}) ===`);
+function isTimeoutError(message: string): boolean {
+  return /statement timeout/i.test(message);
+}
 
-  let cursorVoteCount: number | null = null;
-  let cursorId: string | null = null;
-  let totalProcessed = 0;
-  let chunkIndex = 0;
+// Recursively processes a chunk of movie ids for one rail. On a timeout,
+// halves the chunk and retries both halves instead of failing the whole
+// run. At MIN_CHUNK_SIZE, logs and skips rather than retrying forever --
+// a chunk that won't succeed even at the floor needs investigation, not
+// an infinite retry loop.
+async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
+  const { data, error } = await supabase.rpc(rail.rpcName, {
+    top_k: TOP_K,
+    net_size: NET_SIZE,
+    movie_limit: null,
+    movie_offset: 0,
+    after_vote_count: null,
+    after_id: null,
+    p_specific_ids: ids,
+    ...rail.extraArgs,
+  });
 
-  while (totalProcessed < orderedMovies.length) {
-    const args: Record<string, any> = {
-      top_k: TOP_K,
-      net_size: NET_SIZE,
-      movie_limit: CHUNK_SIZE,
-      movie_offset: 0, // pagination is via after_vote_count/after_id, not offset -- offset stays 0
-      after_vote_count: cursorVoteCount,
-      after_id: cursorId,
-      ...rail.extraArgs,
-    };
+  if (!error) return data as number;
 
-    const { data, error } = await supabase.rpc(rail.rpcName, args);
-    if (error) throw new Error(`${rail.rpcName} failed at chunk ${chunkIndex}: ${error.message}`);
-
-    const processedThisChunk = data as number;
-    if (processedThisChunk === 0) break; // nothing left to process
-
-    totalProcessed += processedThisChunk;
-    chunkIndex++;
-
-    const nextCursorEntry = orderedMovies[totalProcessed - 1];
-    if (!nextCursorEntry) break;
-    cursorVoteCount = nextCursorEntry.vote_count;
-    cursorId = nextCursorEntry.id;
-
-    console.log(`  chunk ${chunkIndex}: +${processedThisChunk} (total ${totalProcessed}/${orderedMovies.length})`);
+  if (isTimeoutError(error.message) && ids.length > MIN_CHUNK_SIZE) {
+    const mid = Math.ceil(ids.length / 2);
+    console.log(`  timeout on chunk of ${ids.length} -- splitting into ${mid} + ${ids.length - mid}`);
+    const first = await processChunk(rail, ids.slice(0, mid));
+    const second = await processChunk(rail, ids.slice(mid));
+    return first + second;
   }
 
-  console.log(`${rail.name} done: ${totalProcessed} movies processed.`);
+  if (isTimeoutError(error.message)) {
+    console.log(`  SKIP: chunk of ${ids.length} still timing out at the floor -- ids: ${ids.slice(0, 3).join(', ')}...`);
+    return 0;
+  }
+
+  throw new Error(`${rail.rpcName} failed on a non-timeout error: ${error.message}`);
+}
+
+async function runRail(rail: RailConfig, orderedIds: string[]) {
+  console.log(`\n=== ${rail.name} (${orderedIds.length} movies, starting chunks of ${INITIAL_CHUNK_SIZE}) ===`);
+  let totalProcessed = 0;
+  for (let i = 0; i < orderedIds.length; i += INITIAL_CHUNK_SIZE) {
+    const chunk = orderedIds.slice(i, i + INITIAL_CHUNK_SIZE);
+    const processed = await processChunk(rail, chunk);
+    totalProcessed += processed;
+    console.log(`  chunk starting at ${i}: +${processed} (total ${totalProcessed}/${orderedIds.length})`);
+  }
+  console.log(`${rail.name} done: ${totalProcessed} processed.`);
 }
 
 async function main() {
-  console.log('Fetching ordered movie list for pagination cursors...');
-  const orderedMovies = await fetchOrderedMovieIds();
-  console.log(`${orderedMovies.length} scored movies to process per rail.`);
+  console.log('Fetching ordered movie list...');
+  const orderedIds = await fetchOrderedMovieIds();
+  console.log(`${orderedIds.length} scored movies to process per rail.`);
 
   for (const rail of RAILS) {
-    await runRail(rail, orderedMovies);
+    await runRail(rail, orderedIds);
   }
 
   console.log('\nAll rails refreshed.');
