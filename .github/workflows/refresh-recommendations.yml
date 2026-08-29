@@ -2,6 +2,14 @@ name: Refresh Recommendations (Full)
 
 on:
   workflow_dispatch:
+  schedule:
+    # Every 6 hours -- longer than the job's own 350min budget, so a
+    # scheduled run can't start while the previous one is still going.
+    - cron: '0 */6 * * *'
+
+concurrency:
+  group: refresh-recommendations
+  cancel-in-progress: false
 
 jobs:
   refresh-recommendations:
