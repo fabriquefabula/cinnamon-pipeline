@@ -1,23 +1,37 @@
 // Refreshes all 5 recommendation rails (movie_neighbors) across the
-// full catalog by calling the compute_* Postgres functions in chunks,
-// adaptively sized -- ported directly from refresh-new-recommendations.ts,
-// which already solved this same timeout problem for the incremental
-// case.
+// full catalog. Adaptive per-chunk sizing (INITIAL_CHUNK_SIZE below)
+// handles individual RPC timeouts -- but even at a working chunk size,
+// a full catalog x 5 rails run takes far longer than a single GitHub
+// Actions job is allowed to run (hard platform ceiling of 6h; this
+// job's own timeout-minutes is set to 350 to stay under that). A run
+// that hits either limit gets killed mid-work with no warning.
 //
-// INITIAL_CHUNK_SIZE was 50 -- confirmed via a real run that this was
-// still far too high: every single 50-chunk cascaded through
-// 50->25->25->13/12/13/12 (3 wasted timeout-and-split round trips) before
-// finally succeeding. 25 failed every time; 13 and 12 succeeded every
-// time -- that's not noise, that's the real threshold for this script's
-// worst-case ordering (highest vote_count movies first, which have the
-// broadest genre/keyword overlap with the rest of the catalog and are
-// the most expensive to score). Starting at 13 directly instead of
-// discovering it by cascading down from 50 on every chunk.
+// So progress checkpoints to bulk_compute_progress (already existed in
+// the schema, written by an older cursor-based version of this script)
+// after every chunk. If the process is killed, the next invocation
+// picks up from the last checkpoint instead of starting the whole
+// catalog over from movie #1. The script also self-stops with a clean
+// checkpoint at TIME_BUDGET_MS, well under the job's own timeout, so a
+// graceful stop-and-resume is the common case, not a hard kill.
+//
+// Trigger this repeatedly (workflow_dispatch, or the schedule added to
+// the workflow) until bulk_compute_progress.current_type reaches
+// 'DONE' -- each run just continues where the last one left off. If
+// is_running is false when a run starts (fresh, or a previous run
+// completed to DONE), it starts over from the beginning on purpose --
+// that's the normal way to kick off a brand new full recompute.
+//
+// INITIAL_CHUNK_SIZE was 250, then 100, then 50 -- confirmed via real
+// runs that all three were too high: 50 cascaded through
+// 50->25->25->13/12/13/12 (3 wasted timeout-and-split round trips) on
+// EVERY chunk. 25 failed every time; 13 and 12 succeeded every time.
+// Starting at 13 directly instead of rediscovering that by cascading
+// down from a much larger number on every single chunk.
 //
 // Order matters and is fixed: closest_match, same_mood, darker_pick,
 // more_accessible, hidden_gem -- each rail excludes picks already used
 // by the ones before it (see the functions' v_excl logic), so running
-// them out of order would break that.
+// them out of order, or resuming into the wrong rail, would break that.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
@@ -30,6 +44,10 @@ const TOP_K = 10;
 const NET_SIZE = 300;
 const INITIAL_CHUNK_SIZE = 13;
 const MIN_CHUNK_SIZE = 10;
+// Job's own timeout-minutes is 350; stopping well before that so a
+// checkpoint write always completes rather than racing the kill signal.
+const TIME_BUDGET_MS = 320 * 60 * 1000;
+const PROGRESS_ROW_ID = 1;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   db: { schema: 'public' },
@@ -55,25 +73,72 @@ const RAILS: RailConfig[] = [
   { name: 'hidden_gem', rpcName: 'compute_hidden_gem', extraArgs: { vote_floor: 250, vote_ceiling: 5000 } },
 ];
 
-// Same ordering the SQL functions used to paginate by internally
-// (vote_count desc, id) -- now fetched fully up front so the whole list
-// can be sliced into adaptively-sized chunks by id, same as the
-// incremental script does.
-async function fetchOrderedMovieIds(): Promise<string[]> {
-  const all: string[] = [];
+interface Progress {
+  currentType: string;
+  isRunning: boolean;
+  cursorVoteCount: number | null;
+  cursorId: string | null;
+}
+
+async function loadProgress(): Promise<Progress> {
+  const { data, error } = await supabase
+    .from('bulk_compute_progress')
+    .select('current_type, is_running, cursor_vote_count, cursor_id')
+    .eq('id', PROGRESS_ROW_ID)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) {
+    return { currentType: RAILS[0].name, isRunning: false, cursorVoteCount: null, cursorId: null };
+  }
+  return {
+    currentType: data.current_type,
+    isRunning: data.is_running,
+    cursorVoteCount: data.cursor_vote_count,
+    cursorId: data.cursor_id,
+  };
+}
+
+async function saveProgress(
+  currentType: string,
+  isRunning: boolean,
+  processedSoFar: number,
+  totalMovies: number,
+  cursorVoteCount: number | null,
+  cursorId: string | null,
+  lastError: string | null = null,
+) {
+  const { error } = await supabase
+    .from('bulk_compute_progress')
+    .update({
+      current_type: currentType,
+      current_offset: processedSoFar,
+      total_movies: totalMovies,
+      is_running: isRunning,
+      last_run_at: new Date().toISOString(),
+      last_batch_processed: processedSoFar,
+      last_error: lastError,
+      cursor_vote_count: cursorVoteCount,
+      cursor_id: cursorId,
+    })
+    .eq('id', PROGRESS_ROW_ID);
+  if (error) console.error('  WARNING: failed to save checkpoint:', error.message);
+}
+
+async function fetchOrderedMovies(): Promise<{ id: string; vote_count: number }[]> {
+  const all: { id: string; vote_count: number }[] = [];
   const PAGE_SIZE = 1000;
   let from = 0;
   while (true) {
     const { data, error } = await supabase
       .from('movies')
-      .select('id')
+      .select('id, vote_count')
       .not('essence_vector', 'is', null)
       .order('vote_count', { ascending: false })
       .order('id', { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) throw error;
     const page = data ?? [];
-    all.push(...(page as any[]).map((r) => r.id));
+    all.push(...(page as any[]));
     if (page.length < PAGE_SIZE) break;
     from += PAGE_SIZE;
   }
@@ -84,11 +149,6 @@ function isTimeoutError(message: string): boolean {
   return /statement timeout/i.test(message);
 }
 
-// Recursively processes a chunk of movie ids for one rail. On a timeout,
-// halves the chunk and retries both halves instead of failing the whole
-// run. At MIN_CHUNK_SIZE, logs and skips rather than retrying forever --
-// a chunk that won't succeed even at the floor needs investigation, not
-// an infinite retry loop.
 async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
   const { data, error } = await supabase.rpc(rail.rpcName, {
     top_k: TOP_K,
@@ -119,31 +179,81 @@ async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
   throw new Error(`${rail.rpcName} failed on a non-timeout error: ${error.message}`);
 }
 
-async function runRail(rail: RailConfig, orderedIds: string[]) {
-  console.log(`\n=== ${rail.name} (${orderedIds.length} movies, starting chunks of ${INITIAL_CHUNK_SIZE}) ===`);
-  let totalProcessed = 0;
-  for (let i = 0; i < orderedIds.length; i += INITIAL_CHUNK_SIZE) {
-    const chunk = orderedIds.slice(i, i + INITIAL_CHUNK_SIZE);
-    const processed = await processChunk(rail, chunk);
-    totalProcessed += processed;
-    console.log(`  chunk starting at ${i}: +${processed} (total ${totalProcessed}/${orderedIds.length})`);
-  }
-  console.log(`${rail.name} done: ${totalProcessed} processed.`);
-}
-
 async function main() {
-  console.log('Fetching ordered movie list...');
-  const orderedIds = await fetchOrderedMovieIds();
-  console.log(`${orderedIds.length} scored movies to process per rail.`);
+  const startTime = Date.now();
 
-  for (const rail of RAILS) {
-    await runRail(rail, orderedIds);
+  console.log('Fetching ordered movie list...');
+  const orderedMovies = await fetchOrderedMovies();
+  console.log(`${orderedMovies.length} scored movies to process per rail.`);
+
+  const progress = await loadProgress();
+
+  let railStartIndex: number;
+  let resumeFromIndex: number;
+
+  if (progress.isRunning) {
+    railStartIndex = RAILS.findIndex((r) => r.name === progress.currentType);
+    if (railStartIndex === -1) railStartIndex = 0;
+    if (progress.cursorId) {
+      const idx = orderedMovies.findIndex(
+        (m) => m.vote_count === progress.cursorVoteCount && m.id === progress.cursorId,
+      );
+      resumeFromIndex = idx >= 0 ? idx + 1 : 0;
+    } else {
+      resumeFromIndex = 0;
+    }
+    console.log(`Resuming an interrupted run: rail "${progress.currentType}", movie index ${resumeFromIndex}.`);
+  } else {
+    railStartIndex = 0;
+    resumeFromIndex = 0;
+    console.log('Starting a fresh full run.');
   }
 
-  console.log('\nAll rails refreshed.');
+  for (let railIdx = railStartIndex; railIdx < RAILS.length; railIdx++) {
+    const rail = RAILS[railIdx];
+    const startIdx = railIdx === railStartIndex ? resumeFromIndex : 0;
+
+    console.log(
+      `\n=== ${rail.name} (resuming at movie ${startIdx}/${orderedMovies.length}, chunks of ${INITIAL_CHUNK_SIZE}) ===`,
+    );
+    let totalProcessed = startIdx;
+
+    for (let i = startIdx; i < orderedMovies.length; i += INITIAL_CHUNK_SIZE) {
+      if (Date.now() - startTime > TIME_BUDGET_MS) {
+        const lastDone = orderedMovies[i - 1];
+        await saveProgress(rail.name, true, i, orderedMovies.length, lastDone?.vote_count ?? null, lastDone?.id ?? null);
+        console.log(
+          `\nTime budget reached at ${rail.name} movie ${i}/${orderedMovies.length}. Checkpoint saved -- next run resumes here.`,
+        );
+        return;
+      }
+
+      const chunkMovies = orderedMovies.slice(i, i + INITIAL_CHUNK_SIZE);
+      const processed = await processChunk(rail, chunkMovies.map((m) => m.id));
+      totalProcessed = i + chunkMovies.length;
+
+      const lastInChunk = chunkMovies[chunkMovies.length - 1];
+      await saveProgress(rail.name, true, totalProcessed, orderedMovies.length, lastInChunk.vote_count, lastInChunk.id);
+
+      console.log(`  chunk starting at ${i}: +${processed} (total ${totalProcessed}/${orderedMovies.length})`);
+    }
+
+    console.log(`${rail.name} done: ${totalProcessed} processed.`);
+  }
+
+  await saveProgress('DONE', false, 0, orderedMovies.length, null, null);
+  console.log('\nAll rails fully refreshed.');
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error('Fatal error:', err);
+  try {
+    await supabase
+      .from('bulk_compute_progress')
+      .update({ last_error: String(err?.message ?? err), is_running: false })
+      .eq('id', PROGRESS_ROW_ID);
+  } catch {
+    // Best effort -- don't mask the original error if this also fails.
+  }
   process.exit(1);
 });
