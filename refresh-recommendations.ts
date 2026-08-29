@@ -2,13 +2,17 @@
 // full catalog by calling the compute_* Postgres functions in chunks,
 // adaptively sized -- ported directly from refresh-new-recommendations.ts,
 // which already solved this same timeout problem for the incremental
-// case. A fixed chunk size was tried twice here (250, then 100) and
-// both failed on chunk 0: this script processes movies highest-vote_count
-// first, which is also the most expensive case (broad genre/keyword
-// overlap with much of the rest of the catalog), and the incremental
-// script needed to go as low as 20 even on arbitrary, not
-// worst-case-first, movies. A fixed number was never going to hold up
-// here; halve-on-timeout and skip-at-floor does.
+// case.
+//
+// INITIAL_CHUNK_SIZE was 50 -- confirmed via a real run that this was
+// still far too high: every single 50-chunk cascaded through
+// 50->25->25->13/12/13/12 (3 wasted timeout-and-split round trips) before
+// finally succeeding. 25 failed every time; 13 and 12 succeeded every
+// time -- that's not noise, that's the real threshold for this script's
+// worst-case ordering (highest vote_count movies first, which have the
+// broadest genre/keyword overlap with the rest of the catalog and are
+// the most expensive to score). Starting at 13 directly instead of
+// discovering it by cascading down from 50 on every chunk.
 //
 // Order matters and is fixed: closest_match, same_mood, darker_pick,
 // more_accessible, hidden_gem -- each rail excludes picks already used
@@ -24,7 +28,7 @@ const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const TOP_K = 10;
 const NET_SIZE = 300;
-const INITIAL_CHUNK_SIZE = 50;
+const INITIAL_CHUNK_SIZE = 13;
 const MIN_CHUNK_SIZE = 10;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
