@@ -37,10 +37,22 @@
 // index-accelerated). net_size 300->100 cuts how many candidates reach
 // that expensive step and measured clean at 8.87s->5.21s for the same
 // worst-case 13-movie batch, with a spot check (The Godfather) showing
-// no quality loss. At the new ~0.40s/movie worst-case rate,
-// INITIAL_CHUNK_SIZE moves 13->150 (~60s/chunk, still real margin under
-// the ~120s effective timeout) to cut round-trip overhead instead of
-// rediscovering a small chunk size that no longer matches the cost.
+// no quality loss.
+//
+// INITIAL_CHUNK_SIZE was set to 150 from that clean-environment rate
+// (~0.40s/movie worst-case, ~60s/chunk). Running for real against live
+// production traffic, that rate turned out not to hold: a single-movie
+// query that took ~0.35s clean measured 1.57s live, and the real run
+// timed out at 150, timed out again at 75, and only started succeeding
+// at 38 -- consistent with that ~4-5x contention multiplier (150 x
+// 1.57s =~235s, way over budget; 38 x 1.57s =~60s, safely under).
+// Every one of those failed attempts before landing on a working size
+// is pure wasted round-trip time, paid on every single chunk for the
+// whole run. Starting at 30 -- a bit below the ~38 observed floor for
+// margin -- skips that cascade for the common case. If contention is
+// ever lighter than this (e.g. genuinely idle traffic), the cost is
+// only some extra round trips, not a correctness problem; if it's ever
+// heavier, the existing halve-on-timeout logic still catches it.
 //
 // Order matters and is fixed: closest_match, same_mood, darker_pick,
 // more_accessible, hidden_gem -- each rail excludes picks already used
@@ -58,7 +70,7 @@ const EVENT_NAME = process.env.EVENT_NAME ?? null;
 
 const TOP_K = 10;
 const NET_SIZE = 100;
-const INITIAL_CHUNK_SIZE = 150;
+const INITIAL_CHUNK_SIZE = 30;
 const MIN_CHUNK_SIZE = 10;
 // Job's own timeout-minutes is 350; stopping well before that so a
 // checkpoint write always completes rather than racing the kill signal.
