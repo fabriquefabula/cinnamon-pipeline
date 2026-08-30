@@ -10,6 +10,7 @@
     "cluster-keywords": "tsx cluster-keywords.ts",
     "refresh-recommendations": "tsx refresh-recommendations.ts",
     "refresh-new-recommendations": "tsx refresh-new-recommendations.ts",
+    "refresh-affected-recommendations": "tsx refresh-affected-recommendations.ts",
     "assign-keyword-groups": "tsx assign-keyword-groups.ts",
     "backfill-relaxed-gate-rails": "tsx backfill-relaxed-gate-rails.ts",
     "recompute-cluster-assignments": "tsx recompute-cluster-assignments.ts",
