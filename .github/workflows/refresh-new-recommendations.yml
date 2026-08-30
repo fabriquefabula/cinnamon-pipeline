@@ -1,4 +1,4 @@
-name: Refresh New Recommendations (Incremental)
+name: Refresh New + Affected Recommendations (Incremental)
 
 on:
   schedule:
@@ -11,7 +11,7 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  refresh-new-recommendations:
+  refresh-recommendations-incremental:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -20,7 +20,20 @@ jobs:
         with:
           node-version: '22'
       - run: npm install
+      # New movies get their own 5 rails first...
       - run: npm run refresh-new-recommendations
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      # ...then existing movies close enough to those new arrivals in
+      # embedding space get rechecked, in case a new movie now belongs
+      # in their top 10. Running this second (not in parallel) means a
+      # new movie is fully established before anything else's list
+      # might start pointing at it. This replaces the need for a full
+      # ~20h catalog recompute on any regular cadence -- both scripts
+      # together touch only new movies plus their embedding-neighbors,
+      # not the whole catalog.
+      - run: npm run refresh-affected-recommendations
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
