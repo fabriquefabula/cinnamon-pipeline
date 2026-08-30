@@ -14,12 +14,19 @@
 // checkpoint at TIME_BUDGET_MS, well under the job's own timeout, so a
 // graceful stop-and-resume is the common case, not a hard kill.
 //
-// Trigger this repeatedly (workflow_dispatch, or the schedule added to
-// the workflow) until bulk_compute_progress.current_type reaches
-// 'DONE' -- each run just continues where the last one left off. If
-// is_running is false when a run starts (fresh, or a previous run
-// completed to DONE), it starts over from the beginning on purpose --
-// that's the normal way to kick off a brand new full recompute.
+// EVENT_NAME (passed from the workflow's github.event_name) gates
+// whether an idle run (is_running=false) is allowed to start a fresh
+// full recompute. The 6h cron schedule exists to RESUME an
+// already-in-progress run, not to launch new ones -- without this
+// check, a completed run sits at is_running=false and the very next
+// scheduled tick would restart the entire ~20h job from scratch,
+// forever, unconditionally. Manual workflow_dispatch can always start
+// a fresh run; the schedule cannot.
+//
+// Trigger this repeatedly (workflow_dispatch, or the schedule) until
+// bulk_compute_progress.current_type reaches 'DONE' -- each run just
+// continues where the last one left off. Once DONE, only an explicit
+// workflow_dispatch starts a brand new full recompute.
 //
 // NET_SIZE and INITIAL_CHUNK_SIZE both re-tuned together after
 // profiling with the pipeline paused (no contention): the real
@@ -41,11 +48,13 @@
 // them out of order, or resuming into the wrong rail, would break that.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+// Optional env var: EVENT_NAME (github.event_name from the workflow)
 
 import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
+const EVENT_NAME = process.env.EVENT_NAME ?? null;
 
 const TOP_K = 10;
 const NET_SIZE = 100;
@@ -189,11 +198,20 @@ async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
 async function main() {
   const startTime = Date.now();
 
+  const progress = await loadProgress();
+
+  if (!progress.isRunning && EVENT_NAME === 'schedule') {
+    console.log(
+      'Nothing in progress (is_running=false) and this run was triggered by the schedule, not workflow_dispatch. ' +
+        'The cron only resumes an in-progress run; it does not start a new full recompute on its own. ' +
+        'Exiting without doing anything. Trigger workflow_dispatch manually to start a fresh run.',
+    );
+    return;
+  }
+
   console.log('Fetching ordered movie list...');
   const orderedMovies = await fetchOrderedMovies();
   console.log(`${orderedMovies.length} scored movies to process per rail.`);
-
-  const progress = await loadProgress();
 
   let railStartIndex: number;
   let resumeFromIndex: number;
@@ -213,7 +231,7 @@ async function main() {
   } else {
     railStartIndex = 0;
     resumeFromIndex = 0;
-    console.log('Starting a fresh full run.');
+    console.log('Starting a fresh full run (manual trigger).');
   }
 
   for (let railIdx = railStartIndex; railIdx < RAILS.length; railIdx++) {
