@@ -21,12 +21,19 @@
 // completed to DONE), it starts over from the beginning on purpose --
 // that's the normal way to kick off a brand new full recompute.
 //
-// INITIAL_CHUNK_SIZE was 250, then 100, then 50 -- confirmed via real
-// runs that all three were too high: 50 cascaded through
-// 50->25->25->13/12/13/12 (3 wasted timeout-and-split round trips) on
-// EVERY chunk. 25 failed every time; 13 and 12 succeeded every time.
-// Starting at 13 directly instead of rediscovering that by cascading
-// down from a much larger number on every single chunk.
+// NET_SIZE and INITIAL_CHUNK_SIZE both re-tuned together after
+// profiling with the pipeline paused (no contention): the real
+// per-movie cost isn't candidate *gathering* (by_keyword alone profiled
+// at 150ms even for a popular movie, genre/keyword filters are
+// GIN-indexed) -- it's *scoring* every candidate the pool hands back
+// (genre weighting, top5_sim, cluster checks, none of which are
+// index-accelerated). net_size 300->100 cuts how many candidates reach
+// that expensive step and measured clean at 8.87s->5.21s for the same
+// worst-case 13-movie batch, with a spot check (The Godfather) showing
+// no quality loss. At the new ~0.40s/movie worst-case rate,
+// INITIAL_CHUNK_SIZE moves 13->150 (~60s/chunk, still real margin under
+// the ~120s effective timeout) to cut round-trip overhead instead of
+// rediscovering a small chunk size that no longer matches the cost.
 //
 // Order matters and is fixed: closest_match, same_mood, darker_pick,
 // more_accessible, hidden_gem -- each rail excludes picks already used
@@ -41,8 +48,8 @@ const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const TOP_K = 10;
-const NET_SIZE = 300;
-const INITIAL_CHUNK_SIZE = 13;
+const NET_SIZE = 100;
+const INITIAL_CHUNK_SIZE = 150;
 const MIN_CHUNK_SIZE = 10;
 // Job's own timeout-minutes is 350; stopping well before that so a
 // checkpoint write always completes rather than racing the kill signal.
