@@ -80,6 +80,16 @@ async function fetchMoviesWithoutNeighbors(): Promise<string[]> {
     cfrom += PAGE_SIZE;
   }
 
+  // Filters on essence_vector_ext_z, not the older essence_vector --
+  // confirmed directly this was a real gap: essence_vector_ext_z (and
+  // keyword_vector_z) are derived from essence_vector_z via a trigger,
+  // and movies can have essence_vector set while essence_vector_z was
+  // never computed (79 such movies found tonight, likely added after a
+  // one-time z-scoring pass rather than an ongoing one -- also fixed
+  // separately). This script computing rails for a movie whose
+  // essence_vector_ext_z is still NULL would crash on a NULL similarity
+  // score, the same failure mode that hit refresh-recommendations.ts
+  // twice at the same offset.
   const missing: string[] = [];
   let from = 0;
   while (true) {
@@ -87,7 +97,7 @@ async function fetchMoviesWithoutNeighbors(): Promise<string[]> {
       .from('movies')
       .select('id')
       .eq('scoring_status', 'scored')
-      .not('essence_vector', 'is', null)
+      .not('essence_vector_ext_z', 'is', null)
       .order('id', { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
     if (error) throw error;
