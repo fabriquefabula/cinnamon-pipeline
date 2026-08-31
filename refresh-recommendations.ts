@@ -54,6 +54,20 @@
 // only some extra round trips, not a correctness problem; if it's ever
 // heavier, the existing halve-on-timeout logic still catches it.
 //
+// fetchOrderedMovies() filters on essence_vector_ext_z, not the older
+// essence_vector -- confirmed directly this was the actual cause behind
+// two separate pipeline crashes at the identical offset (17,820), both
+// with "null value in similarity_score violates not-null constraint".
+// Root cause: essence_vector_ext_z/keyword_vector_z are derived from
+// essence_vector_z via a trigger, and 78 movies had essence_vector (the
+// old raw column, still used by fetchOrderedMovies until this fix) set
+// but essence_vector_z never computed -- likely added after the one-time
+// bulk z-scoring pass earlier tonight, before the trigger's own gap
+// (also fixed) was closed. Filtering on the actual column every rail
+// function requires (essence_vector_ext_z) means a movie can only enter
+// a batch once it's genuinely ready, instead of relying on every
+// pre-existing movie having already been backfilled by coincidence.
+//
 // Order matters and is fixed: closest_match, same_mood, darker_pick,
 // more_accessible, hidden_gem -- each rail excludes picks already used
 // by the ones before it (see the functions' v_excl logic), so running
@@ -160,7 +174,7 @@ async function fetchOrderedMovies(): Promise<{ id: string; vote_count: number }[
     const { data, error } = await supabase
       .from('movies')
       .select('id, vote_count')
-      .not('essence_vector', 'is', null)
+      .not('essence_vector_ext_z', 'is', null)
       .order('vote_count', { ascending: false })
       .order('id', { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
