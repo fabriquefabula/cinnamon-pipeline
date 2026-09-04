@@ -10,6 +10,21 @@ on:
     - cron: '0 13 * * *'
   workflow_dispatch: {}
 
+concurrency:
+  # Shared with refresh-recommendations.yml's own group -- these were
+  # previously uncoordinated. refresh-recommendations runs every 6h and
+  # its own comment notes it routinely spans multiple hours, so the
+  # 12:00 UTC run is very plausibly still going when this job triggers
+  # at 13:00 UTC. Both call the same compute_* rail functions
+  # (DELETE-then-INSERT, no ON CONFLICT) for the same newly-scored
+  # movie when that happens -- confirmed directly this is what crashed
+  # a run on a hidden_gem duplicate-key error, taking
+  # refresh-affected-recommendations down with it since the workflow
+  # step never got there. Queuing (cancel-in-progress: false) behind
+  # whichever one started first instead of racing.
+  group: refresh-recommendations
+  cancel-in-progress: false
+
 jobs:
   refresh-recommendations-incremental:
     runs-on: ubuntu-latest
