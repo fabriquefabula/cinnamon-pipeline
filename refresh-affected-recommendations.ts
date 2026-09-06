@@ -50,12 +50,20 @@ const MIN_CHUNK_SIZE = 10;
 // screen, not a final ranking, so it can afford to be narrower.
 const NEIGHBOR_CHECK_SIZE = 50;
 
+// Retry budget for the discovery query. See fetchAffectedMovieIds.
+const DISCOVERY_MAX_ATTEMPTS = 4;
+const DISCOVERY_BACKOFF_MS = 15000;
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 interface RailConfig {
@@ -72,12 +80,44 @@ const RAILS: RailConfig[] = [
   { name: 'hidden_gem', rpcName: 'compute_hidden_gem', extraArgs: { vote_floor: 250, vote_ceiling: 5000 } },
 ];
 
+// Retries on timeout instead of aborting the run. This was the ONLY
+// database call in this file without timeout handling -- processChunk
+// below has always halved-and-retried -- and a single timeout here
+// killed the whole job.
+//
+// It is not chunkable (there is nothing to split: it's one discovery
+// query), so the strategy is backoff rather than subdivision, and that
+// specifically fits the measured failure. The query costs the same
+// whether there is work to do or not: it always anti-joins all ~48.7k
+// vector-bearing movies against the 2.4M-row movie_neighbors table,
+// which is ~209,000 buffers, about 1.6GB of pages. Measured warm it
+// runs in 444ms. It failed in production because this step runs
+// immediately after refresh-new-recommendations spends ~30 minutes
+// hammering the same database -- cold cache and contention pushed
+// 444ms past the 8s statement timeout, on a run where it turned out
+// there were zero new movies and therefore nothing to do at all.
+//
+// Since the first attempt warms exactly the pages the retry needs, a
+// short backoff is very likely to succeed where an immediate retry of
+// the identical query normally would not.
 async function fetchAffectedMovieIds(): Promise<string[]> {
-  const { data, error } = await supabase.rpc('find_existing_movies_affected_by_new', {
-    p_neighbor_check_size: NEIGHBOR_CHECK_SIZE,
-  });
-  if (error) throw error;
-  return (data ?? []).map((row: any) => row.movie_id as string);
+  for (let attempt = 1; attempt <= DISCOVERY_MAX_ATTEMPTS; attempt++) {
+    const { data, error } = await supabase.rpc('find_existing_movies_affected_by_new', {
+      p_neighbor_check_size: NEIGHBOR_CHECK_SIZE,
+    });
+
+    if (!error) return (data ?? []).map((row: any) => row.movie_id as string);
+
+    if (!isTimeoutError(error.message) || attempt === DISCOVERY_MAX_ATTEMPTS) throw error;
+
+    const waitMs = DISCOVERY_BACKOFF_MS * attempt;
+    console.log(
+      `  discovery query timed out (attempt ${attempt}/${DISCOVERY_MAX_ATTEMPTS}) -- retrying in ${waitMs / 1000}s`,
+    );
+    await sleep(waitMs);
+  }
+  // Unreachable: the loop either returns or throws on the final attempt.
+  throw new Error('find_existing_movies_affected_by_new: exhausted retries');
 }
 
 function isTimeoutError(message: string): boolean {
