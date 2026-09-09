@@ -54,6 +54,21 @@
 // only some extra round trips, not a correctness problem; if it's ever
 // heavier, the existing halve-on-timeout logic still catches it.
 //
+// That 30 does NOT hold for every rail, though, which is why RailConfig
+// now carries an optional per-rail chunkSize. Observed directly in a
+// live run's logs: same_mood completed all 48,661 movies at chunk 30
+// with zero timeouts, while darker_pick timed out on EVERY chunk and
+// fell back to 15+15 -- 100% of chunks, not intermittently. That costs
+// 3 round trips per chunk (one failed attempt plus two recovered
+// halves) where a chunk of 15 costs 1, for the entire catalog.
+// more_accessible shows the same pattern (it timed out at 20 and split
+// to 10+10 in the incremental job). Both are the valence rails, which
+// do strictly more work per candidate than the others: they filter on a
+// gap_threshold against the source's own valence before ranking, so
+// more candidates get scored and discarded. Starting those two at 15
+// skips the guaranteed-failing first attempt; the other three keep 30,
+// where it demonstrably works.
+//
 // fetchOrderedMovies() filters on essence_vector_ext_z, not the older
 // essence_vector -- confirmed directly this was the actual cause behind
 // two separate pipeline crashes at the identical offset (17,820), both
@@ -85,6 +100,8 @@ const EVENT_NAME = process.env.EVENT_NAME ?? null;
 const TOP_K = 10;
 const NET_SIZE = 100;
 const INITIAL_CHUNK_SIZE = 30;
+// The two valence rails start here instead -- see the note above.
+const VALENCE_CHUNK_SIZE = 15;
 const MIN_CHUNK_SIZE = 10;
 // Job's own timeout-minutes is 350; stopping well before that so a
 // checkpoint write always completes rather than racing the kill signal.
@@ -105,13 +122,16 @@ interface RailConfig {
   name: string;
   rpcName: string;
   extraArgs: Record<string, number>;
+  // Optional per-rail starting chunk size. Omitted means
+  // INITIAL_CHUNK_SIZE.
+  chunkSize?: number;
 }
 
 const RAILS: RailConfig[] = [
   { name: 'closest_match', rpcName: 'compute_closest_match', extraArgs: { visibility_floor: 250 } },
   { name: 'same_mood', rpcName: 'compute_same_mood', extraArgs: { visibility_floor: 250, top_n_dims: 5 } },
-  { name: 'darker_pick', rpcName: 'compute_darker_pick', extraArgs: { visibility_floor: 250, gap_threshold: 15 } },
-  { name: 'more_accessible', rpcName: 'compute_more_accessible', extraArgs: { visibility_floor: 250, gap_threshold: 15 } },
+  { name: 'darker_pick', rpcName: 'compute_darker_pick', extraArgs: { visibility_floor: 250, gap_threshold: 15 }, chunkSize: VALENCE_CHUNK_SIZE },
+  { name: 'more_accessible', rpcName: 'compute_more_accessible', extraArgs: { visibility_floor: 250, gap_threshold: 15 }, chunkSize: VALENCE_CHUNK_SIZE },
   { name: 'hidden_gem', rpcName: 'compute_hidden_gem', extraArgs: { vote_floor: 250, vote_ceiling: 5000 } },
 ];
 
@@ -262,14 +282,15 @@ async function main() {
 
   for (let railIdx = railStartIndex; railIdx < RAILS.length; railIdx++) {
     const rail = RAILS[railIdx];
+    const chunkSize = rail.chunkSize ?? INITIAL_CHUNK_SIZE;
     const startIdx = railIdx === railStartIndex ? resumeFromIndex : 0;
 
     console.log(
-      `\n=== ${rail.name} (resuming at movie ${startIdx}/${orderedMovies.length}, chunks of ${INITIAL_CHUNK_SIZE}) ===`,
+      `\n=== ${rail.name} (resuming at movie ${startIdx}/${orderedMovies.length}, chunks of ${chunkSize}) ===`,
     );
     let totalProcessed = startIdx;
 
-    for (let i = startIdx; i < orderedMovies.length; i += INITIAL_CHUNK_SIZE) {
+    for (let i = startIdx; i < orderedMovies.length; i += chunkSize) {
       if (Date.now() - startTime > TIME_BUDGET_MS) {
         const lastDone = orderedMovies[i - 1];
         await saveProgress(rail.name, true, i, orderedMovies.length, lastDone?.vote_count ?? null, lastDone?.id ?? null);
@@ -279,7 +300,7 @@ async function main() {
         return;
       }
 
-      const chunkMovies = orderedMovies.slice(i, i + INITIAL_CHUNK_SIZE);
+      const chunkMovies = orderedMovies.slice(i, i + chunkSize);
       const processed = await processChunk(rail, chunkMovies.map((m) => m.id));
       totalProcessed = i + chunkMovies.length;
 
