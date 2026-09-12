@@ -1,0 +1,35 @@
+name: Ingest TV Credits
+
+on:
+  schedule:
+    # Sundays at 12:00 UTC -- one hour after TV ingestion (11:00), so new
+    # shows exist to fetch credits for. Also clear of the movie credits
+    # run at 10:00, so the two never share a TMDB rate-limit window.
+    - cron: '0 12 * * 0'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (no writes)'
+        required: false
+        default: 'false'
+      show_limit:
+        description: 'Limit number of shows to process (blank = all)'
+        required: false
+
+jobs:
+  ingest-tv-credits:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npx tsx ingest-tv-credits.ts
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          SHOW_LIMIT: ${{ github.event.inputs.show_limit }}
