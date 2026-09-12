@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "ingest": "tsx ingest.ts",
+    "ingest-tv": "tsx ingest-tv.ts",
     "cluster-movies": "tsx cluster-movies.ts",
     "assign-movie-clusters": "tsx assign-movie-clusters.ts",
     "cluster-keywords": "tsx cluster-keywords.ts",
