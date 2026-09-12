@@ -11,12 +11,6 @@
 // ever touches movies. The one shared resource is `people`, populated by
 // ingest-tv-credits.ts, since filmographies are explicitly not siloed.
 //
-// CATALOG_TARGET is 20k against movies' 250k cap (which yielded ~65k
-// actual rows). That is a deliberate product decision, not a technical
-// limit: TMDB lists ~250k series, but the tail is foreign-language
-// soaps, single-episode local news programming and untranslated regional
-// content with no usable overview to score from.
-//
 // Required env vars: TMDB_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
@@ -25,14 +19,27 @@ const TMDB_API_KEY = requireEnv('TMDB_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
-const CATALOG_TARGET = 20_000; // cap, not a quota — see note above
-// Starts at movies' tuned value. The TV vote_count curve has NOT been
-// probed yet and there is no reason to assume it matches film: TV vote
-// counts run structurally lower. Run with DRY_RUN=true first and read
-// the logged totals before trusting this default. Because selection
-// sorts by vote_count descending and then caps at CATALOG_TARGET, a
-// too-low floor costs discovery time rather than catalogue quality — but
-// a too-high floor silently shrinks the catalogue.
+// A cap, not a quota, and one that does not currently bind: measured
+// 2026-09-12 by dry run, TV simply does not have 20k series worth
+// recommending. See the MIN_VOTE_COUNT note below for the numbers. Left
+// well above the real population so it never silently truncates as TMDB
+// grows; if a future run reports a total near this figure, raise it
+// rather than let the catalogue be clipped.
+const CATALOG_TARGET = 20_000;
+// Measured 2026-09-12 (DRY_RUN, floor 20): 12,517 established series +
+// 79 recent premieres = 12,596 qualifying. For contrast, the movie curve
+// at the same floor yields ~65k, and at floor 300 still yields ~11k —
+// the TV distribution is far steeper, because TV vote counts run
+// structurally lower than film.
+//
+// Floor 20 is a deliberate choice to keep, not a leftover from the movie
+// tuning: dropping to 10 would reach roughly 20k, but the marginal ~8k
+// are titles with 10-19 total votes and thin overviews, which are
+// exactly the ones that then fail the scoring gate or score badly. The
+// movie side settled at 20 for the same reason.
+//
+// Expect roughly 9-10k scoring-eligible shows from this: movies ran
+// 65,760 imported -> 48,708 scored, about 74%.
 const MIN_VOTE_COUNT = process.env.MIN_VOTE_COUNT ? parseInt(process.env.MIN_VOTE_COUNT, 10) : 20;
 // When true: discovery and counting only. Logs the result and exits
 // before touching Supabase at all — no pipeline_runs row, no hydration,
@@ -130,11 +137,15 @@ async function selectMainstreamIds(): Promise<{ id: number; rank: number }[]> {
   established.sort((a, b) => b.vote_count - a.vote_count);
 
   const totalQualifying = recent.length + established.length;
+  // Coming in under CATALOG_TARGET is the expected, accepted state here
+  // — around 12.6k at floor 20 as of 2026-09-12 — so this is phrased as
+  // an observation rather than the movie script's warning. Only a total
+  // at or above the cap needs action.
   console.log(
     `Total mainstream-qualifying series: ${totalQualifying}` +
       (totalQualifying < CATALOG_TARGET
-        ? ` — below the ${CATALOG_TARGET} target. Catalogue will be smaller than planned unless MIN_VOTE_COUNT is lowered.`
-        : ` — capping at ${CATALOG_TARGET}.`),
+        ? ` — under the ${CATALOG_TARGET} cap, as expected. Taking all of them.`
+        : ` — at or above the ${CATALOG_TARGET} cap, so the catalogue is being CLIPPED. Raise CATALOG_TARGET.`),
   );
 
   const ranked = [
@@ -245,7 +256,7 @@ async function hydrateShow(tmdbId: number, rank: number): Promise<ShowRow | null
   // TV taglines are far rarer than film taglines, so the
   // "2+ keywords OR a tagline" clause may reject a larger share of shows
   // than it does movies. Do not loosen it blind — check the actual
-  // eligible/ineligible split first.
+  // eligible/ineligible split first, which is logged per batch below.
   const overviewLen = d.overview.trim().length as number;
   const scoringEligible =
     overviewLen >= 100 &&
