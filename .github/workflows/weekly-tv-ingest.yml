@@ -1,0 +1,38 @@
+name: Weekly TV Ingestion
+
+on:
+  schedule:
+    # Sundays at 11:00 UTC — two hours after the movie ingest, so the two
+    # runs never contend for TMDB rate limit at CONCURRENCY=20 each.
+    - cron: '0 11 * * 0'
+  workflow_dispatch: # lets you trigger this manually from the Actions tab
+    inputs:
+      dry_run:
+        description: 'Dry run: discovery/count only, no hydration, no DB writes'
+        type: boolean
+        default: true
+      min_vote_count:
+        description: 'Override MIN_VOTE_COUNT for this run (blank = script default, 20)'
+        type: string
+        required: false
+
+jobs:
+  ingest-tv:
+    runs-on: ubuntu-latest
+    # The 20k catalogue is a fraction of the movie side's 65k, so this
+    # should finish well inside the window. Budgeted against GitHub's
+    # 360-minute hard cap anyway, since the first run hydrates everything.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run ingest-tv
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MIN_VOTE_COUNT: ${{ github.event.inputs.min_vote_count }}
