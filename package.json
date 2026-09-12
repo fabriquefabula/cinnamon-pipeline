@@ -6,6 +6,7 @@
   "scripts": {
     "ingest": "tsx ingest.ts",
     "ingest-tv": "tsx ingest-tv.ts",
+    "ingest-tv-credits": "tsx ingest-tv-credits.ts",
     "cluster-movies": "tsx cluster-movies.ts",
     "assign-movie-clusters": "tsx assign-movie-clusters.ts",
     "cluster-keywords": "tsx cluster-keywords.ts",
