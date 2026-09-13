@@ -38,8 +38,9 @@ const CATALOG_TARGET = 20_000;
 // exactly the ones that then fail the scoring gate or score badly. The
 // movie side settled at 20 for the same reason.
 //
-// Expect roughly 9-10k scoring-eligible shows from this: movies ran
-// 65,760 imported -> 48,708 scored, about 74%.
+// Measured on the first full run: 11,909 of 12,596 inserted, 81.4%
+// scoring-eligible — comfortably above the movie side's 74%, so the
+// "2+ keywords OR a tagline" clause is not over-rejecting TV.
 const MIN_VOTE_COUNT = process.env.MIN_VOTE_COUNT ? parseInt(process.env.MIN_VOTE_COUNT, 10) : 20;
 // When true: discovery and counting only. Logs the result and exits
 // before touching Supabase at all — no pipeline_runs row, no hydration,
@@ -148,12 +149,22 @@ async function selectMainstreamIds(): Promise<{ id: number; rank: number }[]> {
         : ` — at or above the ${CATALOG_TARGET} cap, so the catalogue is being CLIPPED. Raise CATALOG_TARGET.`),
   );
 
-  const ranked = [
-    ...recent.map((r) => r.id),
-    ...established.map((r) => r.id),
-  ].slice(0, CATALOG_TARGET);
+  // De-duplicate before ranking. /discover paginates against live data,
+  // so a series can appear on two pages as results shift underneath, and
+  // the same id can surface in two first-air-year queries. On the first
+  // full run this put a duplicate inside the very first insert batch,
+  // which — see the upsert note below — cost all 500 rows in it.
+  const seen = new Set<number>();
+  const ranked: number[] = [];
+  for (const id of [...recent.map((r) => r.id), ...established.map((r) => r.id)]) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ranked.push(id);
+  }
+  const dupes = recent.length + established.length - ranked.length;
+  if (dupes > 0) console.log(`Removed ${dupes} duplicate id(s) from the discovery set.`);
 
-  return ranked.map((id, i) => ({ id, rank: i + 1 }));
+  return ranked.slice(0, CATALOG_TARGET).map((id, i) => ({ id, rank: i + 1 }));
 }
 
 async function getExistingTmdbIds(): Promise<Set<number>> {
@@ -252,11 +263,9 @@ async function hydrateShow(tmdbId: number, rank: number): Promise<ShowRow | null
   const productionCompanies: string[] = (d.production_companies ?? []).map((c: any) => c.name);
 
   // Same gate as movies, intentionally, so eligibility means the same
-  // thing in both catalogues. Worth measuring after the first real run:
-  // TV taglines are far rarer than film taglines, so the
-  // "2+ keywords OR a tagline" clause may reject a larger share of shows
-  // than it does movies. Do not loosen it blind — check the actual
-  // eligible/ineligible split first, which is logged per batch below.
+  // thing in both catalogues. Verified on the first full run: 81.4% of
+  // TV clears it against 74% for film, so the tagline clause is not
+  // over-rejecting despite TV taglines being rarer.
   const overviewLen = d.overview.trim().length as number;
   const scoringEligible =
     overviewLen >= 100 &&
@@ -320,6 +329,46 @@ async function runWithConcurrency<T, R>(
   return results;
 }
 
+// Postgres rejects a multi-row INSERT as a single statement, so ONE
+// duplicate tmdb_id in a 500-row batch discards all 500. That is exactly
+// what happened on the first full run: ranks 1-500 — the recent
+// premieres plus the 421 highest-voted series in existence — were lost,
+// leaving a catalogue whose most-voted title had 1,305 votes and no
+// Breaking Bad, Game of Thrones or Sopranos in it. The run still
+// reported success, because the error was logged and stepped over.
+//
+// Three defences now, in order:
+//   - upsert on tmdb_id, so a collision updates instead of aborting
+//   - a per-row retry pass, so one genuinely bad row costs one row
+//   - a non-zero failure count is reported as a WARNING at the end and
+//     recorded in pipeline_runs, rather than being buried mid-log
+async function writeBatch(rows: ShowRow[]): Promise<{ written: number; failed: number }> {
+  if (rows.length === 0) return { written: 0, failed: 0 };
+
+  const { error } = await supabase
+    .from('tv_shows')
+    .upsert(rows, { onConflict: 'tmdb_id', ignoreDuplicates: false });
+
+  if (!error) return { written: rows.length, failed: 0 };
+
+  console.error(`Batch upsert failed (${rows.length} rows): ${error.message}. Retrying row by row...`);
+
+  let written = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const { error: rowErr } = await supabase
+      .from('tv_shows')
+      .upsert(row, { onConflict: 'tmdb_id', ignoreDuplicates: false });
+    if (rowErr) {
+      failed++;
+      console.error(`  row tmdb_id=${row.tmdb_id} ("${row.title}") failed: ${rowErr.message}`);
+    } else {
+      written++;
+    }
+  }
+  return { written, failed };
+}
+
 async function main() {
   if (DRY_RUN) {
     console.log(`[DRY RUN] MIN_VOTE_COUNT=${MIN_VOTE_COUNT} — discovery only, no hydration, no DB writes.`);
@@ -346,6 +395,7 @@ async function main() {
     let inserted = 0;
     let rejected = 0;
     let eligible = 0;
+    let writeFailures = 0;
 
     for (let i = 0; i < toFetch.length; i += INSERT_BATCH_SIZE) {
       const batch = toFetch.slice(i, i + INSERT_BATCH_SIZE);
@@ -356,23 +406,23 @@ async function main() {
       rejected += hydrated.length - rows.length;
       eligible += rows.filter((r) => r.scoring_eligible).length;
 
-      if (rows.length > 0) {
-        const { error } = await supabase.from('tv_shows').insert(rows);
-        if (error) console.error('Insert error:', error.message);
-        else inserted += rows.length;
-      }
+      const { written, failed } = await writeBatch(rows);
+      inserted += written;
+      writeFailures += failed;
+
       console.log(
-        `Progress: ${Math.min(i + INSERT_BATCH_SIZE, toFetch.length)}/${toFetch.length} processed, ${inserted} inserted (${eligible} scoring-eligible), ${rejected} rejected so far.`,
+        `Progress: ${Math.min(i + INSERT_BATCH_SIZE, toFetch.length)}/${toFetch.length} processed, ${inserted} written (${eligible} scoring-eligible), ${rejected} rejected, ${writeFailures} write failures so far.`,
       );
     }
 
     await supabase
       .from('pipeline_runs')
       .update({
-        status: 'success',
+        status: writeFailures > 0 ? 'failed' : 'success',
         finished_at: new Date().toISOString(),
         rows_processed: inserted,
-        rows_failed: rejected,
+        rows_failed: rejected + writeFailures,
+        error_message: writeFailures > 0 ? `${writeFailures} row(s) could not be written` : null,
       })
       .eq('id', run!.id);
 
@@ -380,8 +430,13 @@ async function main() {
     // how many Batch API scoring calls the TV pass will cost, and how
     // many sources tv_neighbors will have to compute rails for.
     console.log(
-      `Done. Inserted ${inserted} (${eligible} scoring-eligible), rejected ${rejected} (failed the clean-data gate, or 404s).`,
+      `Done. Wrote ${inserted} (${eligible} scoring-eligible), rejected ${rejected} (failed the clean-data gate, or 404s).`,
     );
+    if (writeFailures > 0) {
+      console.error(
+        `WARNING: ${writeFailures} row(s) could not be written and are MISSING from the catalogue. The run is marked failed in pipeline_runs. Re-run to retry them — hydration is resumable.`,
+      );
+    }
   } catch (err: any) {
     await supabase
       .from('pipeline_runs')
