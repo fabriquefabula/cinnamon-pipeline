@@ -8,6 +8,7 @@
     "ingest-tv": "tsx ingest-tv.ts",
     "ingest-tv-credits": "tsx ingest-tv-credits.ts",
     "cluster-movies": "tsx cluster-movies.ts",
+    "cluster-tv": "tsx cluster-tv.ts",
     "assign-movie-clusters": "tsx assign-movie-clusters.ts",
     "cluster-keywords": "tsx cluster-keywords.ts",
     "refresh-recommendations": "tsx refresh-recommendations.ts",
