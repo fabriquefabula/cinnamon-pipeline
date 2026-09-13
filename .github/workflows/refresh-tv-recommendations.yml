@@ -1,0 +1,29 @@
+name: Refresh TV Recommendations
+
+on:
+  schedule:
+    # Every 6 hours. This RESUMES an in-progress run only — the script
+    # exits immediately on a scheduled trigger when nothing is in
+    # progress, so a completed run can't be restarted from scratch by
+    # the next tick.
+    - cron: '15 */6 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  refresh-tv-recommendations:
+    runs-on: ubuntu-latest
+    # Platform hard ceiling is 360. The script's own TIME_BUDGET_MS is
+    # 320 minutes, so it checkpoints and exits cleanly well before this
+    # rather than racing the kill signal.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npx tsx refresh-tv-recommendations.ts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          EVENT_NAME: ${{ github.event_name }}
