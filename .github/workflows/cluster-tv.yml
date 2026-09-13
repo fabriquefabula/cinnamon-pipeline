@@ -1,0 +1,34 @@
+name: Cluster TV
+
+on:
+  # Manual only. This redefines the entire TV cluster taxonomy —
+  # centroids shift, cluster identity changes, and every
+  # /tv/collection/[slug] URL is derived from the labels it generates.
+  # Not something to run unattended.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: cluster and log, write nothing'
+        type: boolean
+        default: false
+      k:
+        description: 'Number of clusters (blank = 50)'
+        required: false
+
+jobs:
+  cluster-tv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npx tsx cluster-tv.ts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          K: ${{ github.event.inputs.k }}
