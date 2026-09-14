@@ -1,4 +1,4 @@
-// Refreshes all 5 TV recommendation rails (tv_neighbors) across the full
+// Refreshes the TV recommendation rails (tv_neighbors) across the full
 // TV catalogue. Port of refresh-recommendations.ts against the TV silo,
 // carrying over every operational lesson that script records.
 //
@@ -39,12 +39,28 @@
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // Optional: EVENT_NAME (github.event_name from the workflow)
+// Optional: RAILS -- comma-separated rail names to run instead of all
+//   five, e.g. RAILS=darker_pick,more_accessible. For targeted
+//   recomputes when one rail's definition changes and the other four are
+//   still correct; a full run would otherwise rewrite 500k rows to fix
+//   200k of them.
+//
+//   Listed rails still run in the fixed order below, never the order
+//   given, because the exclusion chain depends on it. The chain only
+//   reads rails EARLIER than itself, so recomputing a later rail alone
+//   is consistent -- but recomputing an EARLIER one alone leaves the
+//   later rails excluding rows that no longer exist, which surfaces as
+//   the same title appearing in two rails at once.
 
 import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 const EVENT_NAME = process.env.EVENT_NAME ?? null;
+const RAILS_FILTER =
+  process.env.RAILS && process.env.RAILS.trim().length > 0
+    ? process.env.RAILS.split(',').map((s) => s.trim()).filter(Boolean)
+    : null;
 
 const TOP_K = 10;
 const NET_SIZE = 100;
@@ -75,13 +91,32 @@ interface RailConfig {
   chunkSize?: number;
 }
 
-const RAILS: RailConfig[] = [
+const ALL_RAILS: RailConfig[] = [
   { name: 'closest_match', rpcName: 'compute_tv_closest_match', extraArgs: { visibility_floor: TV_VISIBILITY_FLOOR } },
   { name: 'same_mood', rpcName: 'compute_tv_same_mood', extraArgs: { visibility_floor: TV_VISIBILITY_FLOOR, top_n_dims: 5 } },
   { name: 'darker_pick', rpcName: 'compute_tv_darker_pick', extraArgs: { visibility_floor: TV_VISIBILITY_FLOOR, gap_threshold: 15 }, chunkSize: VALENCE_CHUNK_SIZE },
   { name: 'more_accessible', rpcName: 'compute_tv_more_accessible', extraArgs: { visibility_floor: TV_VISIBILITY_FLOOR, gap_threshold: 15 }, chunkSize: VALENCE_CHUNK_SIZE },
   { name: 'hidden_gem', rpcName: 'compute_tv_hidden_gem', extraArgs: { vote_floor: TV_VISIBILITY_FLOOR, vote_ceiling: TV_VOTE_CEILING } },
 ];
+
+// Filtered by ALL_RAILS' order, not the order the names were given, so a
+// typo'd or reordered RAILS value can't silently break the exclusion
+// chain. An unknown name is a hard error rather than a silent no-op --
+// "RAILS=darker-pick" quietly running zero rails and reporting success
+// is the failure worth preventing.
+const RAILS: RailConfig[] = RAILS_FILTER
+  ? ALL_RAILS.filter((r) => RAILS_FILTER.includes(r.name))
+  : ALL_RAILS;
+
+if (RAILS_FILTER) {
+  const known = new Set(ALL_RAILS.map((r) => r.name));
+  const unknown = RAILS_FILTER.filter((n) => !known.has(n));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown rail name(s) in RAILS: ${unknown.join(', ')}. Valid: ${ALL_RAILS.map((r) => r.name).join(', ')}`,
+    );
+  }
+}
 
 interface Progress {
   currentType: string;
@@ -209,6 +244,10 @@ async function main() {
     return;
   }
 
+  if (RAILS_FILTER) {
+    console.log(`Targeted run: ${RAILS.map((r) => r.name).join(', ')} (of ${ALL_RAILS.length} rails).`);
+  }
+
   console.log('Fetching ordered show list...');
   const orderedShows = await fetchOrderedShows();
   console.log(`${orderedShows.length} scored shows to process per rail.`);
@@ -231,7 +270,7 @@ async function main() {
   } else {
     railStartIndex = 0;
     resumeFromIndex = 0;
-    console.log('Starting a fresh full run (manual trigger).');
+    console.log('Starting a fresh run (manual trigger).');
   }
 
   for (let railIdx = railStartIndex; railIdx < RAILS.length; railIdx++) {
@@ -268,7 +307,7 @@ async function main() {
   }
 
   await saveProgress('DONE', false, 0, orderedShows.length, null, null);
-  console.log('\nAll TV rails fully refreshed.');
+  console.log(RAILS_FILTER ? '\nTargeted rails refreshed.' : '\nAll TV rails fully refreshed.');
 }
 
 main().catch(async (err) => {
