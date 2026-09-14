@@ -7,7 +7,11 @@ on:
     # progress, so a completed run can't be restarted from scratch by
     # the next tick.
     - cron: '15 */6 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      rails:
+        description: 'Rails to run (blank = all 5). e.g. darker_pick,more_accessible'
+        required: false
 
 jobs:
   refresh-tv-recommendations:
@@ -27,3 +31,6 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           EVENT_NAME: ${{ github.event_name }}
+          # Empty on a scheduled run, so a resume always covers every
+          # rail rather than inheriting a previous targeted dispatch.
+          RAILS: ${{ github.event.inputs.rails }}
