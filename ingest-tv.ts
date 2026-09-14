@@ -55,6 +55,20 @@ const INSERT_BATCH_SIZE = 500;
 // this starts slightly before the practical start of broadcast TV.
 const EARLIEST_YEAR = 1930;
 
+// Scoring-eligibility thresholds. See the gate in hydrateShow for why
+// these are two numbers rather than the single overview-length test this
+// used to be.
+//
+// MIN_OVERVIEW_CHARS is a fragment guard, not the real filter: measured
+// across the live catalogue, moving it between 40 and 60 changes the
+// outcome for 13 shows, and only 2 shows in 12,418 have an overview
+// shorter than 40 characters at all. It exists so a one-clause stub
+// ("A new comedy series.") can never qualify on keyword bulk alone.
+const MIN_OVERVIEW_CHARS = 40;
+// MIN_DESCRIPTIVE_CHARS is the old 100-character bar, unchanged in
+// value but now measured across everything the model actually receives.
+const MIN_DESCRIPTIVE_CHARS = 100;
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 function requireEnv(name: string): string {
@@ -262,15 +276,44 @@ async function hydrateShow(tmdbId: number, rank: number): Promise<ShowRow | null
   const networks: string[] = (d.networks ?? []).map((n: any) => n.name);
   const productionCompanies: string[] = (d.production_companies ?? []).map((c: any) => c.name);
 
-  // Same gate as movies, intentionally, so eligibility means the same
-  // thing in both catalogues. Verified on the first full run: 81.4% of
-  // TV clears it against 74% for film, so the tagline clause is not
-  // over-rejecting despite TV taglines being rarer.
+  // Scoring eligibility.
+  //
+  // This used to require the OVERVIEW ALONE to reach 100 characters,
+  // which was wrong in a specific way: cinnamon-scoring/submit-tv.ts's
+  // buildUserContent sends the model title, year, genres, run shape,
+  // tagline AND the full keyword list alongside the overview, so the
+  // overview was never the whole input the 100-char bar was standing in
+  // for. The test measured one field and rejected on behalf of six.
+  //
+  // What that cost, measured on the live catalogue: 440 shows blocked
+  // solely on overview length, 85 of them above the 180-vote visibility
+  // floor. Pluribus (70-char logline, 15 keywords, 2 genres) was
+  // rejected, and so were Narcos and Only Murders in the Building, which
+  // missed the bar by 6 and 2 characters respectively. A rejected show
+  // never gets an essence vector, so it never gets a cluster, so it
+  // never gets a single recommendation anywhere on the site — the
+  // failure surfaces as a blank rail, not as an error.
+  //
+  // The bar is now the same 100 characters, applied to the descriptive
+  // text the model actually receives, with MIN_OVERVIEW_CHARS retained
+  // underneath so keyword bulk can't carry a one-line stub over the
+  // line. Genres and the "2+ keywords OR a tagline" clause are unchanged.
+  //
+  // Recovers 322 of the 440. The remaining 118 are overwhelmingly
+  // non-English telenovelas with ZERO keywords and no tagline, which
+  // fail the keyword clause rather than this one and are correctly still
+  // rejected: a 90-character overview with no other signal genuinely is
+  // too thin to score.
   const overviewLen = d.overview.trim().length as number;
+  const taglineLen = (d.tagline ?? '').trim().length;
+  const keywordLen = keywords.join(', ').length;
+  const descriptiveLen = overviewLen + taglineLen + keywordLen;
+
   const scoringEligible =
-    overviewLen >= 100 &&
     (d.genres?.length ?? 0) > 0 &&
-    (keywords.length >= 2 || Boolean(d.tagline));
+    (keywords.length >= 2 || Boolean(d.tagline)) &&
+    overviewLen >= MIN_OVERVIEW_CHARS &&
+    descriptiveLen >= MIN_DESCRIPTIVE_CHARS;
 
   return {
     tmdb_id: d.id,
