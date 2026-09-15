@@ -10,6 +10,10 @@ on:
       limit:
         description: 'Cap how many collections to process (blank = all that need one)'
         required: false
+      media:
+        description: 'Which catalogue to describe: all, movie, or tv. Use tv to backfill only the TV clusters.'
+        required: false
+        default: 'all'
 
 jobs:
   generate:
@@ -28,3 +32,4 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           LIMIT: ${{ github.event.inputs.limit }}
+          MEDIA: ${{ github.event.inputs.media }}
