@@ -17,6 +17,12 @@
 // feature, so there's no reason to hit TMDB's rate limit refreshing the
 // full 44k+ catalog for a signal only this one feature uses.
 //
+// Each successful row also stamps popularity_refreshed_at. Without it
+// this script left no trace in the database of any kind: it writes only
+// popularity/vote_count/vote_average, and movies has no updated_at
+// trigger, so "did the daily refresh run?" was unanswerable without the
+// Actions log. pipeline-health.ts alerts when that stamp goes stale.
+//
 // Required env vars: TMDB_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
@@ -111,6 +117,7 @@ async function runWithConcurrency<T, R>(
 }
 
 async function main() {
+  const startedAt = new Date().toISOString();
   console.log(`Fetching movies released in the last ${RECENT_MONTHS} months...`);
   const movies = await fetchRecentMovies();
   console.log(`${movies.length} movies to refresh.`);
@@ -121,6 +128,7 @@ async function main() {
   for (let i = 0; i < movies.length; i += UPDATE_BATCH_SIZE) {
     const batch = movies.slice(i, i + UPDATE_BATCH_SIZE);
     const fresh = await runWithConcurrency(batch, CONCURRENCY, fetchFreshValues);
+    const stamp = new Date().toISOString();
 
     for (const row of fresh) {
       if (!row) {
@@ -129,7 +137,12 @@ async function main() {
       }
       const { error } = await supabase
         .from('movies')
-        .update({ popularity: row.popularity, vote_count: row.vote_count, vote_average: row.vote_average })
+        .update({
+          popularity: row.popularity,
+          vote_count: row.vote_count,
+          vote_average: row.vote_average,
+          popularity_refreshed_at: stamp,
+        })
         .eq('id', row.id);
       if (error) {
         console.error(`Update failed for ${row.id}: ${error.message}`);
@@ -140,6 +153,19 @@ async function main() {
     }
     console.log(`Progress: ${Math.min(i + UPDATE_BATCH_SIZE, movies.length)}/${movies.length}, ${updated} updated, ${failed} failed so far.`);
   }
+
+  // Logged so this run is visible next to the ingest runs rather than
+  // only in the Actions log. Best-effort: a logging failure must not fail
+  // a refresh that otherwise succeeded.
+  const { error: logError } = await supabase.from('pipeline_runs').insert({
+    run_type: 'popularity_refresh',
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    rows_processed: updated,
+    rows_failed: failed,
+    status: failed > 0 && updated === 0 ? 'failed' : 'success',
+  });
+  if (logError) console.error(`pipeline_runs logging failed (non-fatal): ${logError.message}`);
 
   console.log(`\nDone. ${updated} updated, ${failed} failed.`);
 }
