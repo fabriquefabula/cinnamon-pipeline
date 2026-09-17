@@ -6,12 +6,26 @@ on:
     # exits immediately on a scheduled trigger when nothing is in
     # progress, so a completed run can't be restarted from scratch by
     # the next tick.
+    #
+    # Because of that, this workflow never picks up a newly scored show.
+    # That job belongs to assign-tv-clusters.yml, which runs daily and
+    # rails anything still missing neighbors.
     - cron: '15 */6 * * *'
   workflow_dispatch:
     inputs:
       rails:
         description: 'Rails to run (blank = all 5). e.g. darker_pick,more_accessible'
         required: false
+
+concurrency:
+  # Shared with assign-tv-clusters.yml, which rails newly scored shows
+  # through the same compute_tv_* functions. Those DELETE-then-INSERT into
+  # tv_neighbors with no ON CONFLICT, so two uncoordinated jobs touching
+  # the same source row crash on a duplicate key — the failure already
+  # observed on the movie side. A full run here can span hours, which makes
+  # overlap with a daily job likely rather than theoretical.
+  group: tv-recommendations
+  cancel-in-progress: false
 
 jobs:
   refresh-tv-recommendations:
