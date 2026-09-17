@@ -1,0 +1,30 @@
+name: Pipeline Health Check
+
+on:
+  schedule:
+    # Daily at 16:00 UTC -- after the day's jobs have had their chance:
+    # popularity (07:00), movie clusters (11:00), movie rails (13:00),
+    # TV assign + rails (15:00). Checking before them would report
+    # yesterday's state and call it today's.
+    - cron: '0 16 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      # Exits non-zero when any check fails, which fails this workflow and
+      # triggers GitHub's own failure notification to the repository owner.
+      # That notification is the alerting mechanism -- there is deliberately
+      # no second channel to configure, credential to rotate, or service to
+      # go down separately from the thing it is watching.
+      - run: npm run pipeline-health
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
