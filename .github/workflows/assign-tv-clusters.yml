@@ -1,0 +1,56 @@
+name: Assign TV Clusters + Rail New Shows (Incremental)
+
+on:
+  schedule:
+    # Daily at 15:00 UTC. Shows become scored at unpredictable times --
+    # tv-scoring-collect polls the Batch API every 3 hours and a batch can
+    # land hours after submission -- so this is a daily sweep for whatever
+    # has become scored since the last run, not a fixed link in a chain.
+    # 15:00 sits clear of the TV rail resume ticks (00:15/06:15/12:15/18:15)
+    # rather than starting next to one.
+    - cron: '0 15 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: report what would be assigned, write nothing (cluster step only)'
+        type: boolean
+        default: false
+
+concurrency:
+  # Shared with refresh-tv-recommendations.yml. Both write tv_neighbors
+  # through the same compute_tv_* functions, which DELETE-then-INSERT with
+  # no ON CONFLICT. The movie side already learned this the hard way: two
+  # uncoordinated jobs touching the same source row crashed a run on a
+  # hidden_gem duplicate-key error. refresh-tv-recommendations can span
+  # hours, so overlap is likely rather than theoretical. Queue behind
+  # whichever started first instead of racing it.
+  group: tv-recommendations
+  cancel-in-progress: false
+
+jobs:
+  assign-and-rail:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      # Clusters first, unconditionally. cluster_score inside every rail
+      # function reads tv_cluster_assignments, so a show railed before it
+      # is placed scores as if it belonged to no collection at all -- and
+      # nothing would ever recompute it, because the next run sees it as
+      # already having neighbors.
+      - run: npm run assign-tv-clusters
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+      # Then the 5 rails for anything still without neighbors. Skipped on a
+      # dry run, since the shows it would rail were never assigned.
+      - run: npm run refresh-tv-new-recommendations
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
