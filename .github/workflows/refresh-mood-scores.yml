@@ -1,4 +1,4 @@
-name: Refresh Mood Axis Scores
+name: Refresh Search Indexes
 
 on:
   schedule:
@@ -8,13 +8,17 @@ on:
     - cron: '30 15 * * *'
   # Also run it by hand straight after retuning anything in mood_axes:
   # every score for that axis is wrong until this completes, and nothing
-  # about the site looks broken in the meantime.
+  # about the site looks broken in the meantime. Same after any change to
+  # the premise lexicon or association rules.
   workflow_dispatch: {}
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Three index rebuilds now, the largest of which grows with the
+    # catalogue. The premise step is non-fatal by design, so a timeout
+    # here would look like a clean run with a silently frozen index.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
