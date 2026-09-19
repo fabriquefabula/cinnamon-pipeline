@@ -40,6 +40,12 @@ const CONCURRENCY = 20; // stays well under TMDB's ~40-50 req/s soft limit
 const INSERT_BATCH_SIZE = 500;
 const EARLIEST_YEAR = 1900;
 
+// Vote count at which a film is reachable on the site. Above this it gets
+// scored from whatever metadata exists, because the alternative is that a
+// film people can find simply isn't there. Kept in step with the floor the
+// search functions use.
+const SITE_VISIBLE_VOTES = 300;
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 function requireEnv(name: string): string {
@@ -185,6 +191,42 @@ interface MovieRow {
   scoring_eligible: boolean;
 }
 
+// Is there enough here for the scoring pass to work from?
+//
+// This used to demand a >=100 character overview AND rich metadata, and
+// the AND was the bug: a film with a short synopsis was rejected however
+// much else it had. Backrooms has a 66-character overview, 19 keywords, a
+// tagline, three genres and 2,647 votes, and was marked permanently
+// ineligible on the strength of the overview alone. A Quiet Place (85
+// chars, 15,557 votes), Nope (96) and It Follows (84) went the same way,
+// and Edward Scissorhands missed by two characters. 673 films that
+// qualify for the site were locked out.
+//
+// Either signal is enough on its own, and a film people can actually
+// reach on the site is scored regardless — an unscored film at that vote
+// count is not a cautious omission, it is a hole in the catalogue.
+export function isScoringEligible(input: {
+  overview: string | null | undefined;
+  genres: unknown[] | null | undefined;
+  keywords: unknown[] | null | undefined;
+  tagline: string | null | undefined;
+  voteCount: number | null | undefined;
+}): boolean {
+  const overviewLen = (input.overview ?? '').trim().length;
+  const nGenres = input.genres?.length ?? 0;
+  const nKeywords = input.keywords?.length ?? 0;
+  const hasTagline = Boolean(input.tagline && input.tagline.trim().length > 0);
+  const votes = input.voteCount ?? 0;
+
+  if (nGenres === 0) return false;
+
+  return (
+    overviewLen >= 100 ||
+    (overviewLen >= 40 && (nKeywords >= 5 || hasTagline)) ||
+    votes >= SITE_VISIBLE_VOTES
+  );
+}
+
 // Returns null for anything that fails the clean-data gate — reject adult,
 // missing poster, or missing overview outright rather than let thin/unreliable
 // entries into the catalog.
@@ -205,11 +247,13 @@ async function hydrateMovie(tmdbId: number, rank: number): Promise<MovieRow | nu
   // no append_to_response needed, it was just never extracted before.
   const productionCompanies: string[] = (d.production_companies ?? []).map((c: any) => c.name);
 
-  const overviewLen = d.overview.trim().length as number;
-  const scoringEligible =
-    overviewLen >= 100 &&
-    (d.genres?.length ?? 0) > 0 &&
-    (keywords.length >= 2 || Boolean(d.tagline));
+  const scoringEligible = isScoringEligible({
+    overview: d.overview,
+    genres: d.genres,
+    keywords,
+    tagline: d.tagline,
+    voteCount: d.vote_count,
+  });
 
   return {
     tmdb_id: d.id,
@@ -260,6 +304,24 @@ async function runWithConcurrency<T, R>(
   return results;
 }
 
+// Eligibility was decided once, at insert, and never revisited — and
+// ingest skips every tmdb_id already in the table, so a film whose TMDB
+// record later gained keywords, a tagline or votes stayed condemned by
+// whatever its metadata looked like the week it arrived. This re-runs the
+// current rule over the existing catalogue, which is where the 673
+// locked-out films came from.
+async function refreshExistingEligibility(): Promise<void> {
+  const { data, error } = await supabase.rpc('refresh_scoring_eligibility', {
+    p_min_votes: SITE_VISIBLE_VOTES,
+  });
+  if (error) {
+    // Never fail the ingest over this: the new titles are already in.
+    console.error('Eligibility refresh failed:', error.message);
+    return;
+  }
+  console.log(`Eligibility refresh: ${data ?? 0} existing movie(s) became eligible.`);
+}
+
 async function main() {
   if (DRY_RUN) {
     console.log(`[DRY RUN] MIN_VOTE_COUNT=${MIN_VOTE_COUNT} — discovery only, no hydration, no DB writes.`);
@@ -303,6 +365,8 @@ async function main() {
         `Progress: ${Math.min(i + INSERT_BATCH_SIZE, toFetch.length)}/${toFetch.length} processed, ${inserted} inserted, ${rejected} rejected so far.`,
       );
     }
+
+    await refreshExistingEligibility();
 
     await supabase
       .from('pipeline_runs')
