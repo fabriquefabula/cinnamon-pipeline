@@ -1,22 +1,32 @@
-// Rebuilds the precomputed mood axis scores for both catalogues.
+// Rebuilds the precomputed search indexes for both catalogues.
+//
+// TWO LAYERS, same trigger:
 //
 // movie_axis_scores and tv_axis_scores hold one row per (title, axis) --
 // roughly 1.4M and 300k respectively. They exist because computing those
 // scores at query time cost ~5s per search; precomputed, a descriptive
 // search runs in about 1.5s and a name lookup in 55ms.
 //
-// They go stale on two events, and only these two:
+// The premise index (premise_docs / premise_tokens / premise_idf /
+// premise_vocab / premise_cooc / premise_assoc) is what answers a query
+// that describes what HAPPENS in a film -- "a woman returns to her
+// hometown after her father dies" -- by searching the essence_summary the
+// scoring pass wrote for every title, and by knowing which words tend to
+// appear together in those summaries.
+//
+// Both go stale on the same two events, and only these two:
 //
 //   1. A title is scored or rescored. New arrivals have no rows at all,
-//      so they are invisible to mood search until this runs.
+//      so they are invisible to mood search, and absent from premise
+//      search, until this runs.
 //   2. An axis is retuned in mood_axes. Every row for that axis is then
 //      wrong, and the search silently ranks on the old direction.
 //
 // The second is the dangerous one: nothing about the site looks broken,
 // the results are just quietly built on superseded weights. This runs
-// daily rather than on a trigger because a full rebuild takes ~30s and
-// there is no benefit to being more current than the scoring pipeline
-// that feeds it, which is weekly.
+// daily rather than on a trigger because a full rebuild takes about a
+// minute and there is no benefit to being more current than the scoring
+// pipeline that feeds it, which is weekly.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
@@ -51,6 +61,22 @@ async function main() {
   // returning nothing at all. Worth failing loudly for.
   if ((movieRows ?? 0) === 0 || (tvRows ?? 0) === 0) {
     throw new Error(`Refusing to report success: movie=${movieRows}, tv=${tvRows}`);
+  }
+
+  // Deliberately non-fatal, unlike the axis rebuild above. An empty axis
+  // table breaks mood search outright; a stale premise index only means
+  // the newest titles rank on their keywords rather than on what they are
+  // about, which is a degradation and not an outage. Failing the whole
+  // run over it would throw away a successful axis rebuild.
+  console.log('Rebuilding the premise index...');
+  const { data: premise, error: premiseErr } = await supabase.rpc('refresh_premise_index');
+  if (premiseErr) {
+    console.error(`refresh_premise_index failed (non-fatal): ${premiseErr.message}`);
+  } else {
+    const row = Array.isArray(premise) ? premise[0] : premise;
+    console.log(
+      `  ${row?.docs ?? '?'} docs, ${row?.vocab ?? '?'} vocabulary, ${row?.assoc ?? '?'} associations.`,
+    );
   }
 
   const { error: logError } = await supabase.from('pipeline_runs').insert({
