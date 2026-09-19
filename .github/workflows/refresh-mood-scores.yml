@@ -1,0 +1,27 @@
+name: Refresh Mood Axis Scores
+
+on:
+  schedule:
+    # Daily at 15:30 UTC -- after assign-tv-clusters (15:00) has placed
+    # and railed anything newly scored, and before the health check at
+    # 16:00, so a failure here is visible the same day.
+    - cron: '30 15 * * *'
+  # Also run it by hand straight after retuning anything in mood_axes:
+  # every score for that axis is wrong until this completes, and nothing
+  # about the site looks broken in the meantime.
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run refresh-mood-scores
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
