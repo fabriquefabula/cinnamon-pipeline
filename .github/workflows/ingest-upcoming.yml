@@ -2,6 +2,15 @@ name: Ingest Upcoming Releases
 
 on:
   workflow_dispatch:
+  # Narrow on purpose: only a change to this job's own script or this
+  # file starts it. A new or edited ingest is then exercised the moment
+  # it lands instead of waiting for tomorrow's cron, and no unrelated
+  # commit in the repo triggers a TMDB sweep.
+  push:
+    branches: [main]
+    paths:
+      - 'ingest-upcoming.ts'
+      - '.github/workflows/ingest-upcoming.yml'
   schedule:
     # Daily, 06:00 UTC -- an hour before the movie popularity refresh, so
     # anything new that lands today is already in the catalogue when the

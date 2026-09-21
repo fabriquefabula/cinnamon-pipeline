@@ -2,6 +2,13 @@ name: Refresh Popularity (Active TV)
 
 on:
   workflow_dispatch:
+  # Same narrow path filter as the upcoming ingest -- see that file for
+  # the reasoning.
+  push:
+    branches: [main]
+    paths:
+      - 'refresh-tv-popularity.ts'
+      - '.github/workflows/refresh-tv-popularity.yml'
   schedule:
     # Daily, 07:30 UTC -- half an hour after the movie refresh so the two
     # never contend for TMDB's rate limit, and still well before the
