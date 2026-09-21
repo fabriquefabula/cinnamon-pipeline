@@ -41,6 +41,7 @@ const LIMITS = {
   movieIngestMaxAge: 9 * DAY, // weekly, Sundays 09:00 UTC
   tvIngestMaxAge: 9 * DAY, // weekly, Sundays 11:00 UTC
   popularityMaxAge: 48 * HOUR, // daily, 07:00 UTC
+  tvPopularityMaxAge: 48 * HOUR, // daily, 07:30 UTC
   movieRailMaxAge: 48 * HOUR, // daily, 13:00 UTC
   moviesAwaitingRails: 200,
   tvAwaitingClusters: 50,
@@ -60,6 +61,7 @@ interface Health {
   last_movie_ingest: string | null;
   last_tv_ingest: string | null;
   last_popularity_refresh: string | null;
+  last_tv_popularity_refresh: string | null;
   last_movie_rail: string | null;
   last_tv_rail: string | null;
   movies_awaiting_rails: number;
@@ -117,6 +119,12 @@ function evaluate(h: Health): Check[] {
     freshness('movie_ingest', h.last_movie_ingest, LIMITS.movieIngestMaxAge, now),
     freshness('tv_ingest', h.last_tv_ingest, LIMITS.tvIngestMaxAge, now),
     freshness('popularity_refresh', h.last_popularity_refresh, LIMITS.popularityMaxAge, now),
+    // Watched for the same reason as the movie stamp, and it matters
+    // more here than the number alone suggests: this job also refreshes
+    // last_air_date, which the TV "Popular this week" row filters on. If
+    // it stops, that row does not just go stale -- it empties, as every
+    // frozen air date ages past the window.
+    freshness('tv_popularity_refresh', h.last_tv_popularity_refresh, LIMITS.tvPopularityMaxAge, now),
     freshness('movie_rails', h.last_movie_rail, LIMITS.movieRailMaxAge, now),
 
     backlog('movies_awaiting_rails', h.movies_awaiting_rails, LIMITS.moviesAwaitingRails),
@@ -186,6 +194,9 @@ async function main() {
 
   // Recorded so health history is queryable alongside the pipeline's own
   // runs. Best-effort: a logging failure must not change the verdict.
+  // 'health_check' was rejected by pipeline_runs_run_type_check until the
+  // migration that widened it, so every insert from here was silently
+  // dropped and no health history exists before that point.
   const { error: logError } = await supabase.from('pipeline_runs').insert({
     run_type: 'health_check',
     started_at: startedAt,
