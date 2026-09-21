@@ -63,7 +63,6 @@ async function tmdbGet(path: string): Promise<any> {
 interface Title {
   id: string;
   tmdb_id: number;
-  title: string;
 }
 
 async function pageAll(build: (from: number, to: number) => any): Promise<Title[]> {
@@ -92,7 +91,7 @@ async function scopedTitles(
   const byFloor = await pageAll((from, to) =>
     supabase
       .from(table)
-      .select('id, tmdb_id, title')
+      .select('id, tmdb_id')
       .eq('scoring_status', 'scored')
       .gte('vote_count', voteFloor)
       .order('id', { ascending: true })
@@ -101,7 +100,7 @@ async function scopedTitles(
 
   const savedIds = new Set<string>();
   for (const src of savedFrom) {
-    const { data, error } = await supabase.from(src.table).select(src.column);
+    const { data, error } = await supabase.from(src.table).select(src.column).limit(5000);
     if (error) throw error;
     for (const row of data ?? []) {
       const v = (row as any)[src.column];
@@ -115,10 +114,7 @@ async function scopedTitles(
   const extra: Title[] = [];
   for (let i = 0; i < missing.length; i += 500) {
     const chunk = missing.slice(i, i + 500);
-    const { data, error } = await supabase
-      .from(table)
-      .select('id, tmdb_id, title')
-      .in('id', chunk);
+    const { data, error } = await supabase.from(table).select('id, tmdb_id').in('id', chunk);
     if (error) throw error;
     extra.push(...((data ?? []) as Title[]));
   }
@@ -167,8 +163,7 @@ async function runWithConcurrency<T, R>(
 }
 
 async function refresh(
-  table: 'movies' | 'tv_shows',
-  endpoint: 'movie' | 'tv',
+  media: 'movie' | 'tv',
   titles: Title[],
 ): Promise<{ written: number; failed: number; withProviders: number }> {
   let written = 0;
@@ -180,36 +175,43 @@ async function refresh(
     const stamp = new Date().toISOString();
 
     const rows = await runWithConcurrency(batch, CONCURRENCY, async (t) => {
-      const d = await tmdbGet(`/${endpoint}/${t.tmdb_id}/watch/providers`);
+      const d = await tmdbGet(`/${media}/${t.tmdb_id}/watch/providers`);
       if (!d) return null;
       const providers = compact(d.results);
       if (providers) withProviders++;
-      return {
-        id: t.id,
-        // title rides along because ON CONFLICT still validates NOT NULL
-        // on the proposed row, so an upsert without it is rejected
-        // outright. It is written back unchanged.
-        title: t.title,
-        watch_providers: providers,
-        watch_providers_refreshed_at: stamp,
-      };
+      return { id: t.id, providers, refreshed_at: stamp };
     });
 
     const good = rows.filter((r): r is NonNullable<typeof r> => r !== null);
     failed += rows.length - good.length;
 
     if (good.length > 0) {
-      const { error } = await supabase.from(table).upsert(good, { onConflict: 'id' });
+      // apply_watch_providers is an UPDATE ... FROM, so it writes only
+      // these two columns and can never create a row. It returns the
+      // number it matched, which is checked below -- a mismatch means
+      // ids that are not in the catalogue, and that is worth knowing
+      // rather than silently succeeding.
+      const { data, error } = await supabase.rpc('apply_watch_providers', {
+        p_media: media,
+        p_rows: good,
+      });
       if (error) {
-        console.error(`${table}: batch write failed (${good.length} rows): ${error.message}`);
+        console.error(`${media}: batch write failed (${good.length} rows): ${error.message}`);
         failed += good.length;
       } else {
-        written += good.length;
+        const matched = Number(data ?? 0);
+        written += matched;
+        if (matched !== good.length) {
+          console.error(
+            `${media}: wrote ${matched} of ${good.length} in this batch -- ${good.length - matched} id(s) matched no row.`,
+          );
+          failed += good.length - matched;
+        }
       }
     }
 
     console.log(
-      `${table} ${Math.min(i + WRITE_BATCH, titles.length)}/${titles.length}: ${written} written, ${withProviders} with availability, ${failed} failed`,
+      `${media} ${Math.min(i + WRITE_BATCH, titles.length)}/${titles.length}: ${written} written, ${withProviders} with availability, ${failed} failed`,
     );
   }
 
@@ -230,8 +232,8 @@ async function main() {
   ]);
   console.log(`${movies.length} movies, ${shows.length} shows.`);
 
-  const m = await refresh('movies', 'movie', movies);
-  const t = await refresh('tv_shows', 'tv', shows);
+  const m = await refresh('movie', movies);
+  const t = await refresh('tv', shows);
 
   const processed = m.written + t.written;
   const failedTotal = m.failed + t.failed;
