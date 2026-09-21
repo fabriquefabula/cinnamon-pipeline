@@ -17,6 +17,14 @@
 // near zero by definition -- and the clean-data gate (poster, overview,
 // not adult) is what keeps the junk out instead.
 //
+// Dropping the floor is why MAX_PER_CATALOGUE exists. Without it the
+// discovery is bounded only by TMDB's own 10,000-result ceiling, and
+// every dated title on earth for the next six months would be hydrated,
+// stored, and -- if scoring-eligible -- queued for a paid Batch API
+// call. An Upcoming row does not need the entire global release
+// calendar, and this would quietly have become the most expensive job in
+// the pipeline.
+//
 // 180 days rather than the 90 the homepage row displays: the row would
 // otherwise stand empty at its own boundary every time a release slips,
 // and a title needs to already be in the catalogue on the day it enters
@@ -36,6 +44,11 @@ const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const HORIZON_DAYS = 180;
+// Results come back popularity-descending, so the first 300 are the
+// titles a person would actually recognise -- which is the whole job of
+// an Upcoming row. See the cost note above for why this is a hard cap
+// rather than a generous one.
+const MAX_PER_CATALOGUE = 300;
 const CONCURRENCY = 20; // same as the other ingests -- well under TMDB's soft limit
 const BATCH_SIZE = 100;
 const SITE_VISIBLE_VOTES = 300; // kept in step with ingest.ts
@@ -64,11 +77,11 @@ function dateOffset(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-async function discoverAll(buildPath: (page: number) => string): Promise<number[]> {
+async function discoverAll(buildPath: (page: number) => string, max: number): Promise<number[]> {
   const ids: number[] = [];
   const seen = new Set<number>();
   let page = 1;
-  while (page <= 500) {
+  while (page <= 500 && ids.length < max) {
     const data = await tmdbGet(buildPath(page));
     if (!data?.results?.length) break;
     for (const r of data.results) {
@@ -82,7 +95,7 @@ async function discoverAll(buildPath: (page: number) => string): Promise<number[
     if (page >= data.total_pages) break;
     page++;
   }
-  return ids;
+  return ids.slice(0, max);
 }
 
 async function existingIds(table: string, tmdbIds: number[]): Promise<Set<number>> {
@@ -321,7 +334,7 @@ async function main() {
   const startedAt = new Date().toISOString();
   const from = dateOffset(0);
   const to = dateOffset(HORIZON_DAYS);
-  console.log(`Upcoming window: ${from} to ${to}`);
+  console.log(`Upcoming window: ${from} to ${to} (max ${MAX_PER_CATALOGUE} per catalogue)`);
 
   let processed = 0;
   let failedTotal = 0;
@@ -331,8 +344,9 @@ async function main() {
     (page) =>
       `/discover/movie?sort_by=popularity.desc&primary_release_date.gte=${from}` +
       `&primary_release_date.lte=${to}&page=${page}`,
+    MAX_PER_CATALOGUE,
   );
-  console.log(`${movieIds.length} upcoming movie ids discovered.`);
+  console.log(`${movieIds.length} upcoming movie ids taken.`);
   const existingMovies = await existingIds('movies', movieIds);
 
   for (let i = 0; i < movieIds.length; i += BATCH_SIZE) {
@@ -353,8 +367,9 @@ async function main() {
     (page) =>
       `/discover/tv?sort_by=popularity.desc&first_air_date.gte=${from}` +
       `&first_air_date.lte=${to}&page=${page}`,
+    MAX_PER_CATALOGUE,
   );
-  console.log(`${showIds.length} upcoming series ids discovered.`);
+  console.log(`${showIds.length} upcoming series ids taken.`);
   const existingShows = await existingIds('tv_shows', showIds);
 
   for (let i = 0; i < showIds.length; i += BATCH_SIZE) {
