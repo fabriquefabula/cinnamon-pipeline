@@ -27,6 +27,7 @@
     "fix-untitled-groups": "tsx fix-untitled-groups.ts",
     "refresh-popularity": "tsx refresh-popularity.ts",
     "refresh-tv-popularity": "tsx refresh-tv-popularity.ts",
+    "refresh-availability": "tsx refresh-availability.ts",
     "pipeline-health": "tsx pipeline-health.ts"
   },
   "dependencies": {

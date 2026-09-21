@@ -1,0 +1,33 @@
+name: Refresh Watch Availability
+
+on:
+  workflow_dispatch:
+  # Same narrow path filter as the other daily jobs: only a change to
+  # this job's own script or this file starts it.
+  push:
+    branches: [main]
+    paths:
+      - 'refresh-availability.ts'
+      - '.github/workflows/refresh-availability.yml'
+  schedule:
+    # Daily, 08:30 UTC -- after both popularity refreshes, so any title
+    # that has just become reachable is already in scope.
+    - cron: '30 8 * * *'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # Generous: ~14,000 TMDB calls at 20 concurrent. Well inside this,
+    # but a slow TMDB day should not kill a run most of the way through.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run refresh-availability
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

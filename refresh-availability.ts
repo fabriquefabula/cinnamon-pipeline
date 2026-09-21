@@ -1,0 +1,257 @@
+// Where each title can be streamed, rented or bought, per country.
+//
+// Source is TMDB's /watch/providers endpoint, whose data comes from
+// JustWatch. TMDB's terms are explicit that the source must be
+// attributed to JustWatch wherever it is shown, and that they will
+// revoke API access over it -- see components/WhereToWatch.tsx in
+// cinnamon-web, which carries that credit.
+//
+// What is stored is deliberately thin: provider NAMES, grouped by
+// country and by how you get it. No logo paths, no per-provider links,
+// no display_priority. That is not laziness about the UI -- the whole
+// design depends on it. The column is embedded in a statically rendered
+// page so the viewer's own browser can pick its country out of it, with
+// no per-view request and no geo-IP. Carrying artwork for ~200 countries
+// per title would make that payload too big to ship, and the fallback --
+// fetching per view -- is a function invocation on every page load,
+// which is the cost line this project has already had to cut once.
+//
+// Scope: titles a visitor can actually reach (the same vote floors the
+// site's own rows use), plus anything any user has saved, so an obscure
+// film someone put on their watchlist still shows availability. About
+// 14,000 of the 62,000 in the catalogue. Availability churns constantly,
+// so a daily call for a title nobody can find is pure waste.
+//
+// Required env vars: TMDB_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+
+import { createClient } from '@supabase/supabase-js';
+
+const TMDB_API_KEY = requireEnv('TMDB_API_KEY');
+const SUPABASE_URL = requireEnv('SUPABASE_URL');
+const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
+
+// Kept in step with the floors the site uses for "visible": 300 for
+// film, 180 for TV, where TV vote counts run structurally lower.
+const MOVIE_VOTE_FLOOR = 300;
+const TV_VOTE_FLOOR = 180;
+
+const CONCURRENCY = 20; // same as the other TMDB jobs
+const WRITE_BATCH = 500;
+const PAGE_SIZE = 1000;
+
+// Ordered as they are displayed. 'free' and 'ads' only appear for some
+// countries, and are worth keeping: "free with ads" is a real answer to
+// "where can I watch this".
+const KINDS = ['flatrate', 'free', 'ads', 'rent', 'buy'] as const;
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+function requireEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing required env var: ${name}`);
+  return v;
+}
+
+async function tmdbGet(path: string): Promise<any> {
+  const res = await fetch(`https://api.themoviedb.org/3${path}`, {
+    headers: { Authorization: `Bearer ${TMDB_API_KEY}` },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+interface Title {
+  id: string;
+  tmdb_id: number;
+  title: string;
+}
+
+async function pageAll(build: (from: number, to: number) => any): Promise<Title[]> {
+  const rows: Title[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await build(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = (data ?? []) as Title[];
+    rows.push(...page);
+    if (page.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
+
+// Two passes rather than one clever query: PostgREST cannot express
+// "above the floor OR referenced by one of four other tables" in a
+// single filter, and doing it in SQL would mean a view to maintain.
+// Merged on id here instead.
+async function scopedTitles(
+  table: 'movies' | 'tv_shows',
+  voteFloor: number,
+  savedFrom: { table: string; column: string }[],
+): Promise<Title[]> {
+  const byFloor = await pageAll((from, to) =>
+    supabase
+      .from(table)
+      .select('id, tmdb_id, title')
+      .eq('scoring_status', 'scored')
+      .gte('vote_count', voteFloor)
+      .order('id', { ascending: true })
+      .range(from, to),
+  );
+
+  const savedIds = new Set<string>();
+  for (const src of savedFrom) {
+    const { data, error } = await supabase.from(src.table).select(src.column);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      const v = (row as any)[src.column];
+      if (v) savedIds.add(v as string);
+    }
+  }
+
+  const have = new Set(byFloor.map((t) => t.id));
+  const missing = [...savedIds].filter((id) => !have.has(id));
+
+  const extra: Title[] = [];
+  for (let i = 0; i < missing.length; i += 500) {
+    const chunk = missing.slice(i, i + 500);
+    const { data, error } = await supabase
+      .from(table)
+      .select('id, tmdb_id, title')
+      .in('id', chunk);
+    if (error) throw error;
+    extra.push(...((data ?? []) as Title[]));
+  }
+
+  return [...byFloor, ...extra];
+}
+
+// TMDB returns, per country, arrays of provider objects plus a `link`.
+// Everything but the names is dropped. Countries with nothing at all are
+// dropped too, so the stored object holds only places the title can
+// actually be watched.
+function compact(results: any): Record<string, Record<string, string[]>> | null {
+  const out: Record<string, Record<string, string[]>> = {};
+  for (const [country, entry] of Object.entries(results ?? {})) {
+    const bucket: Record<string, string[]> = {};
+    for (const kind of KINDS) {
+      const list = (entry as any)?.[kind];
+      if (!Array.isArray(list) || list.length === 0) continue;
+      // De-duplicated: the same service often appears twice in one
+      // country under regional sub-brands with different provider_ids.
+      const names = Array.from(
+        new Set(list.map((p: any) => p?.provider_name).filter((n: any) => typeof n === 'string' && n)),
+      );
+      if (names.length > 0) bucket[kind] = names;
+    }
+    if (Object.keys(bucket).length > 0) out[country] = bucket;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function runner() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await worker(items[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: limit }, runner));
+  return results;
+}
+
+async function refresh(
+  table: 'movies' | 'tv_shows',
+  endpoint: 'movie' | 'tv',
+  titles: Title[],
+): Promise<{ written: number; failed: number; withProviders: number }> {
+  let written = 0;
+  let failed = 0;
+  let withProviders = 0;
+
+  for (let i = 0; i < titles.length; i += WRITE_BATCH) {
+    const batch = titles.slice(i, i + WRITE_BATCH);
+    const stamp = new Date().toISOString();
+
+    const rows = await runWithConcurrency(batch, CONCURRENCY, async (t) => {
+      const d = await tmdbGet(`/${endpoint}/${t.tmdb_id}/watch/providers`);
+      if (!d) return null;
+      const providers = compact(d.results);
+      if (providers) withProviders++;
+      return {
+        id: t.id,
+        // title rides along because ON CONFLICT still validates NOT NULL
+        // on the proposed row, so an upsert without it is rejected
+        // outright. It is written back unchanged.
+        title: t.title,
+        watch_providers: providers,
+        watch_providers_refreshed_at: stamp,
+      };
+    });
+
+    const good = rows.filter((r): r is NonNullable<typeof r> => r !== null);
+    failed += rows.length - good.length;
+
+    if (good.length > 0) {
+      const { error } = await supabase.from(table).upsert(good, { onConflict: 'id' });
+      if (error) {
+        console.error(`${table}: batch write failed (${good.length} rows): ${error.message}`);
+        failed += good.length;
+      } else {
+        written += good.length;
+      }
+    }
+
+    console.log(
+      `${table} ${Math.min(i + WRITE_BATCH, titles.length)}/${titles.length}: ${written} written, ${withProviders} with availability, ${failed} failed`,
+    );
+  }
+
+  return { written, failed, withProviders };
+}
+
+async function main() {
+  const startedAt = new Date().toISOString();
+
+  console.log('Collecting titles in scope...');
+  const movies = await scopedTitles('movies', MOVIE_VOTE_FLOOR, [
+    { table: 'user_movies', column: 'movie_id' },
+    { table: 'list_movies', column: 'movie_id' },
+  ]);
+  const shows = await scopedTitles('tv_shows', TV_VOTE_FLOOR, [
+    { table: 'user_tv_shows', column: 'show_id' },
+    { table: 'list_tv_shows', column: 'show_id' },
+  ]);
+  console.log(`${movies.length} movies, ${shows.length} shows.`);
+
+  const m = await refresh('movies', 'movie', movies);
+  const t = await refresh('tv_shows', 'tv', shows);
+
+  const processed = m.written + t.written;
+  const failedTotal = m.failed + t.failed;
+
+  const { error: logError } = await supabase.from('pipeline_runs').insert({
+    run_type: 'availability_refresh',
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    rows_processed: processed,
+    rows_failed: failedTotal,
+    status: failedTotal > 0 && processed === 0 ? 'failed' : 'success',
+  });
+  if (logError) console.error(`pipeline_runs logging failed (non-fatal): ${logError.message}`);
+
+  console.log(
+    `\nDone. ${processed} written (${m.withProviders + t.withProviders} have availability somewhere), ${failedTotal} failed.`,
+  );
+}
+
+main().catch((err) => {
+  console.error('Fatal error:', err);
+  process.exit(1);
+});
