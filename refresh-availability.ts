@@ -36,7 +36,13 @@ const MOVIE_VOTE_FLOOR = 300;
 const TV_VOTE_FLOOR = 180;
 
 const CONCURRENCY = 20; // same as the other TMDB jobs
-const WRITE_BATCH = 500;
+// 100, not 500. The first working run wrote 9,051 rows and failed
+// exactly 5,000 -- ten whole batches, which is the signature of the
+// request body being rejected rather than of bad data. A batch of 500
+// popular titles carries availability for dozens of countries each and
+// runs to megabytes; a batch of obscure ones does not, which is why
+// some batches went through and others did not.
+const WRITE_BATCH = 100;
 const PAGE_SIZE = 1000;
 
 // Ordered as they are displayed. 'free' and 'ads' only appear for some
@@ -63,6 +69,12 @@ async function tmdbGet(path: string): Promise<any> {
 interface Title {
   id: string;
   tmdb_id: number;
+}
+
+interface Row {
+  id: string;
+  providers: Record<string, Record<string, string[]>> | null;
+  refreshed_at: string;
 }
 
 async function pageAll(build: (from: number, to: number) => any): Promise<Title[]> {
@@ -162,6 +174,42 @@ async function runWithConcurrency<T, R>(
   return results;
 }
 
+// Halves on failure, down to single rows. The batch size above avoids
+// the size cliff in the common case; this is what stops one oversized
+// or malformed row taking the other 99 with it -- the failure mode
+// ingest-tv.ts hit on its first full run, where a single duplicate in a
+// 500-row statement discarded all 500.
+async function writeRows(media: 'movie' | 'tv', rows: Row[]): Promise<{ written: number; failed: number }> {
+  if (rows.length === 0) return { written: 0, failed: 0 };
+
+  const { data, error } = await supabase.rpc('apply_watch_providers', {
+    p_media: media,
+    p_rows: rows,
+  });
+
+  if (!error) {
+    // apply_watch_providers is an UPDATE ... FROM, so it can never
+    // create a row. It returns how many it matched; a shortfall means
+    // ids that are not in the catalogue, which is worth counting rather
+    // than reporting as success.
+    const matched = Number(data ?? 0);
+    if (matched !== rows.length) {
+      console.error(`${media}: ${rows.length - matched} id(s) matched no row.`);
+    }
+    return { written: matched, failed: rows.length - matched };
+  }
+
+  if (rows.length === 1) {
+    console.error(`${media}: row ${rows[0].id} failed: ${error.message}`);
+    return { written: 0, failed: 1 };
+  }
+
+  const mid = Math.floor(rows.length / 2);
+  const left = await writeRows(media, rows.slice(0, mid));
+  const right = await writeRows(media, rows.slice(mid));
+  return { written: left.written + right.written, failed: left.failed + right.failed };
+}
+
 async function refresh(
   media: 'movie' | 'tv',
   titles: Title[],
@@ -174,41 +222,20 @@ async function refresh(
     const batch = titles.slice(i, i + WRITE_BATCH);
     const stamp = new Date().toISOString();
 
-    const rows = await runWithConcurrency(batch, CONCURRENCY, async (t) => {
+    const fetched = await runWithConcurrency(batch, CONCURRENCY, async (t) => {
       const d = await tmdbGet(`/${media}/${t.tmdb_id}/watch/providers`);
       if (!d) return null;
       const providers = compact(d.results);
       if (providers) withProviders++;
-      return { id: t.id, providers, refreshed_at: stamp };
+      return { id: t.id, providers, refreshed_at: stamp } as Row;
     });
 
-    const good = rows.filter((r): r is NonNullable<typeof r> => r !== null);
-    failed += rows.length - good.length;
+    const good = fetched.filter((r): r is Row => r !== null);
+    failed += fetched.length - good.length;
 
-    if (good.length > 0) {
-      // apply_watch_providers is an UPDATE ... FROM, so it writes only
-      // these two columns and can never create a row. It returns the
-      // number it matched, which is checked below -- a mismatch means
-      // ids that are not in the catalogue, and that is worth knowing
-      // rather than silently succeeding.
-      const { data, error } = await supabase.rpc('apply_watch_providers', {
-        p_media: media,
-        p_rows: good,
-      });
-      if (error) {
-        console.error(`${media}: batch write failed (${good.length} rows): ${error.message}`);
-        failed += good.length;
-      } else {
-        const matched = Number(data ?? 0);
-        written += matched;
-        if (matched !== good.length) {
-          console.error(
-            `${media}: wrote ${matched} of ${good.length} in this batch -- ${good.length - matched} id(s) matched no row.`,
-          );
-          failed += good.length - matched;
-        }
-      }
-    }
+    const result = await writeRows(media, good);
+    written += result.written;
+    failed += result.failed;
 
     console.log(
       `${media} ${Math.min(i + WRITE_BATCH, titles.length)}/${titles.length}: ${written} written, ${withProviders} with availability, ${failed} failed`,
