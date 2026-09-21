@@ -42,10 +42,12 @@ const LIMITS = {
   tvIngestMaxAge: 9 * DAY, // weekly, Sundays 11:00 UTC
   popularityMaxAge: 48 * HOUR, // daily, 07:00 UTC
   tvPopularityMaxAge: 48 * HOUR, // daily, 07:30 UTC
+  availabilityMaxAge: 48 * HOUR, // daily, 08:30 UTC
+  upcomingIngestMaxAge: 48 * HOUR, // daily, 06:00 UTC
   movieRailMaxAge: 48 * HOUR, // daily, 13:00 UTC
   moviesAwaitingRails: 200,
-  tvAwaitingClusters: 50,
-  tvAwaitingRails: 50,
+  tvAwaitingClusters: 300,
+  tvAwaitingRails: 300,
 };
 
 type Severity = 'ok' | 'warn' | 'fail';
@@ -62,6 +64,8 @@ interface Health {
   last_tv_ingest: string | null;
   last_popularity_refresh: string | null;
   last_tv_popularity_refresh: string | null;
+  last_availability_refresh: string | null;
+  last_upcoming_ingestion: string | null;
   last_movie_rail: string | null;
   last_tv_rail: string | null;
   movies_awaiting_rails: number;
@@ -118,6 +122,7 @@ function evaluate(h: Health): Check[] {
   const checks: Check[] = [
     freshness('movie_ingest', h.last_movie_ingest, LIMITS.movieIngestMaxAge, now),
     freshness('tv_ingest', h.last_tv_ingest, LIMITS.tvIngestMaxAge, now),
+    freshness('upcoming_ingest', h.last_upcoming_ingestion, LIMITS.upcomingIngestMaxAge, now),
     freshness('popularity_refresh', h.last_popularity_refresh, LIMITS.popularityMaxAge, now),
     // Watched for the same reason as the movie stamp, and it matters
     // more here than the number alone suggests: this job also refreshes
@@ -125,9 +130,14 @@ function evaluate(h: Health): Check[] {
     // it stops, that row does not just go stale -- it empties, as every
     // frozen air date ages past the window.
     freshness('tv_popularity_refresh', h.last_tv_popularity_refresh, LIMITS.tvPopularityMaxAge, now),
+    freshness('availability_refresh', h.last_availability_refresh, LIMITS.availabilityMaxAge, now),
     freshness('movie_rails', h.last_movie_rail, LIMITS.movieRailMaxAge, now),
 
     backlog('movies_awaiting_rails', h.movies_awaiting_rails, LIMITS.moviesAwaitingRails),
+    // 300, not 50. The weekly TV collect lands a few hundred newly
+    // scored shows in one go, and they sit unclustered until the next
+    // daily assignment run hours later -- a backlog that clears itself,
+    // not a fault. At 50 this failed every week for a normal cadence.
     backlog('tv_awaiting_clusters', h.tv_awaiting_clusters, LIMITS.tvAwaitingClusters),
     backlog('tv_awaiting_rails', h.tv_awaiting_rails, LIMITS.tvAwaitingRails),
   ];
