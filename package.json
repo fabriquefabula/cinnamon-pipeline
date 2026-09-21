@@ -25,6 +25,7 @@
     "generate-display-labels": "tsx generate-display-labels.ts",
     "fix-untitled-groups": "tsx fix-untitled-groups.ts",
     "refresh-popularity": "tsx refresh-popularity.ts",
+    "refresh-tv-popularity": "tsx refresh-tv-popularity.ts",
     "pipeline-health": "tsx pipeline-health.ts"
   },
   "dependencies": {
