@@ -27,9 +27,14 @@ jobs:
       # means the Vercel side is missing entirely, or was added without
       # redeploying afterwards, since Vercel only injects variables at
       # build time.
+      #
+      # -L because the apex redirects and the first run died on the 308
+      # without ever reaching the route. 308 keeps the method, so the
+      # POST survives the hop; %{http_code} reports the final response,
+      # not the redirect.
       - name: Purge the homepages
         run: |
-          status=$(curl -sS --max-time 30 -o /tmp/body -w '%{http_code}' \
+          status=$(curl -sS -L --max-time 30 -o /tmp/body -w '%{http_code}' \
             -X POST \
             -H "x-revalidate-secret: ${{ secrets.REVALIDATE_SECRET }}" \
             https://cinnamondb.com/api/revalidate)
