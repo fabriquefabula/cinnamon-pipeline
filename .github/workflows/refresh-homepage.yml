@@ -20,6 +20,13 @@ jobs:
       # No checkout, no npm install -- this is one HTTP call. The work
       # happens in cinnamon-web/app/api/revalidate/route.ts, which purges
       # / and /tv in every edge region.
+      #
+      # REVALIDATE_SECRET exists TWICE and the two have to match: here,
+      # and as a Production environment variable on the cinnamon-web
+      # project in Vercel. A 401 below means they have drifted; a 503
+      # means the Vercel side is missing entirely, or was added without
+      # redeploying afterwards, since Vercel only injects variables at
+      # build time.
       - name: Purge the homepages
         run: |
           status=$(curl -sS --max-time 30 -o /tmp/body -w '%{http_code}' \
