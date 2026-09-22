@@ -25,6 +25,14 @@
 // it: there is nothing to be gained by being more current than the
 // data.
 //
+// A function that runs cleanly in the SQL editor can still fail from
+// here. The editor connects as postgres; this connects through
+// PostgREST, whose session has pg_safeupdate loaded, and that rejects
+// any UPDATE or DELETE without a WHERE clause. That is exactly how
+// refresh_discover_genre_profiles failed its first scheduled run after
+// working by hand every time. Anything added below has to be proved
+// through the API.
+//
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
