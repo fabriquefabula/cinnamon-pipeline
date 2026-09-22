@@ -40,15 +40,83 @@ function requireEnv(name: string): string {
   return v;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Everything supabase-js knows about a failure, not just the headline.
+//
+// Two different kinds of thing arrive as `error` and they need opposite
+// treatment. A PostgREST refusal carries a code (a SQLSTATE like 42501,
+// or a PGRSTnnn) and a usable message. A transport failure -- the
+// request never completing -- arrives as a stringified undici
+// TypeError with an empty code, and undici puts the only useful part,
+// the reason, on `cause`: ENOTFOUND, ECONNRESET, UND_ERR_CONNECT_TIMEOUT.
+// Printing `.message` alone reduces every one of those to the same
+// four words, "TypeError: fetch failed", which is how the first run of
+// this job failed with nothing to go on.
+function describe(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as Record<string, unknown>;
+    const parts = [String(e.message ?? e)];
+    if (e.code) parts.push(`code=${String(e.code)}`);
+    if (e.details) parts.push(`details=${String(e.details)}`);
+    if (e.hint) parts.push(`hint=${String(e.hint)}`);
+    if (e.cause) parts.push(`cause=${describe(e.cause)}`);
+    if (e.errno) parts.push(`errno=${String(e.errno)}`);
+    if (e.syscall) parts.push(`syscall=${String(e.syscall)}`);
+    return parts.join(' | ');
+  }
+  return String(err);
+}
+
+// A refusal is an answer: the same call will be refused the same way in
+// ten seconds, so retrying it only delays the report. A dropped or
+// unmade connection is not an answer, and on a hosted runner it is
+// routinely a one-off. Only the second kind is worth another attempt.
+function isTransportFailure(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as Record<string, unknown>;
+  if (e.code) return false; // PostgREST or Postgres said something.
+  const text = `${String(e.message ?? '')} ${String(e.details ?? '')}`.toLowerCase();
+  return (
+    text.includes('fetch failed') ||
+    text.includes('network') ||
+    text.includes('socket') ||
+    text.includes('econnreset') ||
+    text.includes('enotfound') ||
+    text.includes('eai_again') ||
+    text.includes('etimedout')
+  );
+}
+
+const ATTEMPTS = 3;
+
+async function rpc<T>(name: string): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    const { data, error } = await supabase.rpc(name);
+    if (!error) return data as T;
+
+    if (!isTransportFailure(error) || attempt === ATTEMPTS) {
+      throw new Error(`${name} failed: ${describe(error)}`);
+    }
+
+    const waitMs = 5000 * attempt;
+    console.warn(
+      `  ${name} did not reach the database: ${describe(error)}\n` +
+        `  Retrying in ${waitMs / 1000}s (attempt ${attempt + 1} of ${ATTEMPTS}).`,
+    );
+    await sleep(waitMs);
+  }
+}
+
+const startedAt = new Date().toISOString();
+
 async function main() {
-  const startedAt = new Date().toISOString();
-
   console.log('Deriving TV genres TMDB does not have...');
-  const { data: derived, error: derivedErr } = await supabase.rpc('refresh_tv_derived_genres');
-  if (derivedErr) throw new Error(`refresh_tv_derived_genres failed: ${derivedErr.message}`);
-
-  const derivedRows = (derived ?? []) as { out_genre: string; out_shows: number }[];
-  for (const row of derivedRows) {
+  const derivedRows = await rpc<{ out_genre: string; out_shows: number }[] | null>(
+    'refresh_tv_derived_genres',
+  );
+  const derived = derivedRows ?? [];
+  for (const row of derived) {
     console.log(`  ${row.out_genre}: ${row.out_shows} shows.`);
   }
 
@@ -56,44 +124,55 @@ async function main() {
   // practice means the rules table was emptied or the fingerprints went
   // missing. Worth failing on: the next step would then quietly drop
   // Horror and Romance out of the Discover picker with no other signal.
-  if (derivedRows.length === 0) {
+  if (derived.length === 0) {
     throw new Error('No derived genres produced -- refusing to rebuild profiles on an empty set.');
   }
 
   console.log('Rebuilding Discover genre profiles...');
-  const { data: profiles, error: profileErr } = await supabase.rpc(
-    'refresh_discover_genre_profiles',
-  );
-  if (profileErr) throw new Error(`refresh_discover_genre_profiles failed: ${profileErr.message}`);
-
-  const profileRows = (profiles ?? []) as {
-    media: string;
-    genres_kept: number;
-    rows_written: number;
-  }[];
-  for (const row of profileRows) {
+  const profileRows = await rpc<
+    { media: string; genres_kept: number; rows_written: number }[] | null
+  >('refresh_discover_genre_profiles');
+  const profiles = profileRows ?? [];
+  for (const row of profiles) {
     console.log(`  ${row.media}: ${row.genres_kept} genres, ${row.rows_written} rows.`);
   }
 
-  const totalGenres = profileRows.reduce((sum, r) => sum + (r.genres_kept ?? 0), 0);
+  const totalGenres = profiles.reduce((sum, r) => sum + (r.genres_kept ?? 0), 0);
   if (totalGenres === 0) {
     throw new Error('Refusing to report success: no genre profiles written.');
   }
 
-  const { error: logError } = await supabase.from('pipeline_runs').insert({
-    run_type: 'discover_refresh',
-    started_at: startedAt,
-    finished_at: new Date().toISOString(),
-    rows_processed: profileRows.reduce((sum, r) => sum + (r.rows_written ?? 0), 0),
-    rows_failed: 0,
-    status: 'success',
-  });
-  if (logError) console.error(`pipeline_runs logging failed (non-fatal): ${logError.message}`);
-
+  await logRun('success', profiles.reduce((sum, r) => sum + (r.rows_written ?? 0), 0));
   console.log('Done.');
 }
 
-main().catch((err) => {
-  console.error('Fatal error:', err);
+// Logging is best-effort in both directions. On success it is the only
+// record that the job ran at all, which is what pipeline-health reads.
+// On failure it is worth attempting even though the database may be
+// exactly what could not be reached -- if the failure was in the second
+// step, the first call proved the connection works, and a failure row
+// is the difference between a job that stopped and a job nobody can
+// tell has stopped.
+async function logRun(status: 'success' | 'failed', rows: number) {
+  const { error } = await supabase.from('pipeline_runs').insert({
+    run_type: 'discover_refresh',
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    rows_processed: rows,
+    rows_failed: status === 'failed' ? 1 : 0,
+    status,
+  });
+  if (error) console.error(`pipeline_runs logging failed (non-fatal): ${describe(error)}`);
+}
+
+main().catch(async (err) => {
+  console.error(`Fatal error: ${describe(err)}`);
+  if (err instanceof Error && err.stack) console.error(err.stack);
+  try {
+    await logRun('failed', 0);
+  } catch {
+    // The database being unreachable is the likeliest reason to be
+    // here; it must not replace the real error with its own.
+  }
   process.exit(1);
 });
