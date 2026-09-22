@@ -1,0 +1,33 @@
+name: Refresh Discover Profiles
+
+on:
+  workflow_dispatch:
+  # Same narrow path filter as the other jobs: only a change to this
+  # job's own script or this file starts it.
+  push:
+    branches: [main]
+    paths:
+      - 'refresh-discover.ts'
+      - '.github/workflows/refresh-discover.yml'
+  schedule:
+    # Mondays, 09:30 UTC. After the weekend ingest and scoring have
+    # settled, and an hour clear of the 08:30 availability refresh so
+    # the two are not writing at once.
+    - cron: '30 9 * * 1'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # Both RPCs together are well under a minute at current catalogue
+    # size; this is headroom, not an estimate.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run refresh-discover
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

@@ -19,6 +19,7 @@
     "refresh-tv-recommendations": "tsx refresh-tv-recommendations.ts",
     "refresh-tv-new-recommendations": "tsx refresh-tv-new-recommendations.ts",
     "refresh-mood-scores": "tsx refresh-mood-scores.ts",
+    "refresh-discover": "tsx refresh-discover.ts",
     "assign-keyword-groups": "tsx assign-keyword-groups.ts",
     "backfill-relaxed-gate-rails": "tsx backfill-relaxed-gate-rails.ts",
     "recompute-cluster-assignments": "tsx recompute-cluster-assignments.ts",
