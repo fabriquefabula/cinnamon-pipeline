@@ -1,0 +1,52 @@
+name: Submit to IndexNow
+
+# Bing, DuckDuckGo, Yandex, Seznam and Copilot all read from one
+# endpoint and act on a submission in hours. Google is not part of it --
+# Google's own Indexing API is limited to job postings and livestreams,
+# so for ordinary pages the sitemap remains the only lever there.
+#
+# Daily rather than on deploy, because a shelf is a row in a table: new
+# ones appear with no deploy at all, and a schedule catches those while
+# a deploy hook would not.
+
+on:
+  schedule:
+    # 04:20 UTC, off the hour so it is not queued behind everything else
+    # that runs at :00.
+    - cron: '20 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: POST to /api/indexnow
+        run: |
+          # -L because cinnamondb.com 308-redirects to www and curl does
+          # not follow by default. That exact omission made the first
+          # homepage revalidation run report 308 and do nothing.
+          status=$(curl -sS -L --max-time 60 -o /tmp/body -w '%{http_code}' \
+            -X POST \
+            -H "x-revalidate-secret: ${{ secrets.REVALIDATE_SECRET }}" \
+            https://www.cinnamondb.com/api/indexnow)
+
+          echo "HTTP $status"
+          cat /tmp/body
+          echo
+
+          if [ "$status" != "200" ]; then
+            echo "::error::IndexNow submission returned HTTP $status"
+            exit 1
+          fi
+
+          # The route reports how many URLs it sent. Zero means the
+          # shelves query came back empty, which is a failure that would
+          # otherwise look exactly like success.
+          submitted=$(grep -o '"submitted":[0-9]*' /tmp/body | cut -d: -f2)
+          if [ -z "$submitted" ] || [ "$submitted" -lt 10 ]; then
+            echo "::error::Only ${submitted:-0} URLs submitted -- expected hundreds"
+            exit 1
+          fi
+
+          echo "Submitted $submitted URLs."
