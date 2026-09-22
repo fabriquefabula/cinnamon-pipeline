@@ -1,0 +1,34 @@
+name: Refresh Homepage Cache
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/refresh-homepage.yml'
+  schedule:
+    # Hourly at :05. The homepages pick their hero and their six mood
+    # rows from the hour number, so this fires just after the hour has
+    # turned rather than racing it.
+    - cron: '5 * * * *'
+
+jobs:
+  revalidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout, no npm install -- this is one HTTP call. The work
+      # happens in cinnamon-web/app/api/revalidate/route.ts, which purges
+      # / and /tv in every edge region.
+      - name: Purge the homepages
+        run: |
+          status=$(curl -sS --max-time 30 -o /tmp/body -w '%{http_code}' \
+            -X POST \
+            -H "x-revalidate-secret: ${{ secrets.REVALIDATE_SECRET }}" \
+            https://cinnamondb.com/api/revalidate)
+          cat /tmp/body
+          echo
+          if [ "$status" != "200" ]; then
+            echo "Revalidate returned HTTP $status"
+            exit 1
+          fi
