@@ -33,13 +33,21 @@
 // it: there is nothing to be gained by being more current than the
 // data.
 //
-// A function that runs cleanly in the SQL editor can still fail from
-// here. The editor connects as postgres; this connects through
-// PostgREST, whose session has pg_safeupdate loaded, and that rejects
-// any UPDATE or DELETE without a WHERE clause. That is exactly how
-// refresh_discover_genre_profiles failed its first scheduled run after
-// working by hand every time. Anything added below has to be proved
-// through the API.
+// TWO WAYS A FUNCTION THAT WORKS IN THE SQL EDITOR FAILS FROM HERE, both
+// of which this job has already been bitten by. The editor connects as
+// postgres; this connects through PostgREST, as a role with different
+// rules:
+//
+//   - pg_safeupdate is loaded in that session and rejects any UPDATE or
+//     DELETE without a WHERE clause. refresh_discover_genre_profiles
+//     returned 400 on its first scheduled run after a dozen clean runs
+//     by hand.
+//   - statement_timeout is 8 seconds. refresh_movie_facet_df takes 6.8
+//     and was cancelled the first time the job ran it. Anything near
+//     that has to set its own timeout on the function, as
+//     refresh_tv_derived_genres and refresh_movie_facet_df now do.
+//
+// Anything added below has to be proved through the API, not the editor.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
