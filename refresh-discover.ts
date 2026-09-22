@@ -1,7 +1,7 @@
-// Rebuilds what the Discover tool stands on, in the one order that is
-// correct.
+// Rebuilds what the Discover tool and list recommendations stand on, in
+// the one order that is correct.
 //
-// TWO STEPS, and the order is not arbitrary:
+// THREE STEPS, and the order of the first two is not arbitrary:
 //
 //   1. tv_shows.derived_genres -- genres TMDB's television taxonomy
 //      does not have. It gives TV sixteen genres and Horror is not one
@@ -20,6 +20,14 @@
 //      genres || derived_genres, so running this BEFORE step 1 would
 //      build profiles for a Horror genre that does not exist yet, or
 //      worse, build them from last week's membership.
+//
+//   3. movie_facet_df -- how many scored films carry each genre,
+//      keyword, director, cast member, studio, language and cluster.
+//      list_consensus weighs what a list has in common by how rare it
+//      is, which is the only thing separating "all seven are dramas"
+//      from "all seven are Studio Ghibli", and a value rare enough gets
+//      turned into a hard filter. Stale counts make that judgement
+//      quietly wrong in the direction of over-filtering.
 //
 // Weekly because that is the cadence of the scoring pipeline feeding
 // it: there is nothing to be gained by being more current than the
@@ -150,14 +158,36 @@ async function main() {
     throw new Error('Refusing to report success: no genre profiles written.');
   }
 
-  await logRun('success', profiles.reduce((sum, r) => sum + (r.rows_written ?? 0), 0));
+  console.log('Recounting facets for list recommendations...');
+  const facetRows = await rpc<{ facet_type: string; values_kept: number }[] | null>(
+    'refresh_movie_facet_df',
+  );
+  const facets = facetRows ?? [];
+  for (const row of facets) {
+    console.log(`  ${row.facet_type}: ${row.values_kept} values.`);
+  }
+
+  // Same reasoning as the empty-genres check above. An empty facet
+  // table does not break list_consensus, which is worse than if it did:
+  // every idf would collapse to the same number, nothing would ever
+  // qualify as rare, and list pages would quietly go back to
+  // recommending whatever sits nearest the average.
+  const facetValues = facets.reduce((sum, r) => sum + (r.values_kept ?? 0), 0);
+  if (facetValues === 0) {
+    throw new Error('Refusing to report success: no facet counts written.');
+  }
+
+  await logRun(
+    'success',
+    profiles.reduce((sum, r) => sum + (r.rows_written ?? 0), 0) + facetValues,
+  );
   console.log('Done.');
 }
 
 // Logging is best-effort in both directions. On success it is the only
 // record that the job ran at all, which is what pipeline-health reads.
 // On failure it is worth attempting even though the database may be
-// exactly what could not be reached -- if the failure was in the second
+// exactly what could not be reached -- if the failure was in a later
 // step, the first call proved the connection works, and a failure row
 // is the difference between a job that stopped and a job nobody can
 // tell has stopped.
