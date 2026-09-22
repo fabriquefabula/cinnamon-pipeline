@@ -84,6 +84,22 @@ interface Row {
   refreshed_at: string;
 }
 
+// Where saved titles are read from. `column` is the title id to collect;
+// `orderBy` is that table's PRIMARY KEY, and it has to be, because range
+// paging over a non-unique sort key is not stable between requests --
+// two users save the same film, two lists hold the same show, and a row
+// sitting on a page boundary can come back twice or not at all.
+const SAVED_SOURCES = {
+  movies: [
+    { table: 'user_movies', column: 'movie_id', orderBy: ['id'] },
+    { table: 'list_movies', column: 'movie_id', orderBy: ['list_id', 'movie_id'] },
+  ],
+  tv_shows: [
+    { table: 'user_tv_shows', column: 'show_id', orderBy: ['id'] },
+    { table: 'list_tv_shows', column: 'show_id', orderBy: ['list_id', 'show_id'] },
+  ],
+} as const;
+
 async function pageAll(build: (from: number, to: number) => any): Promise<Title[]> {
   const rows: Title[] = [];
   let from = 0;
@@ -105,7 +121,7 @@ async function pageAll(build: (from: number, to: number) => any): Promise<Title[
 async function scopedTitles(
   table: 'movies' | 'tv_shows',
   voteFloor: number,
-  savedFrom: { table: string; column: string }[],
+  savedFrom: readonly { table: string; column: string; orderBy: readonly string[] }[],
 ): Promise<Title[]> {
   const byFloor = await pageAll((from, to) =>
     supabase
@@ -117,19 +133,17 @@ async function scopedTitles(
       .range(from, to),
   );
 
-  // Paged, not limited. A flat .limit() here silently stops adding
-  // saved titles the moment one of these tables outgrows it, and the
-  // only symptom is availability quietly missing from somebody's
-  // watchlist.
+  // Paged, not limited. A flat .limit() stops collecting saved titles
+  // the moment one of these tables outgrows it, and the only symptom is
+  // availability quietly missing from somebody's watchlist.
   const savedIds = new Set<string>();
   for (const src of savedFrom) {
+    const cols = Array.from(new Set([src.column, ...src.orderBy])).join(', ');
     let from = 0;
     for (;;) {
-      const { data, error } = await supabase
-        .from(src.table)
-        .select(src.column)
-        .order(src.column, { ascending: true })
-        .range(from, from + PAGE_SIZE - 1);
+      let q = supabase.from(src.table).select(cols);
+      for (const col of src.orderBy) q = q.order(col, { ascending: true });
+      const { data, error } = await q.range(from, from + PAGE_SIZE - 1);
       if (error) throw error;
       const page = data ?? [];
       for (const row of page) {
@@ -270,14 +284,8 @@ async function main() {
   const startedAt = new Date().toISOString();
 
   console.log('Collecting titles in scope...');
-  const movies = await scopedTitles('movies', MOVIE_VOTE_FLOOR, [
-    { table: 'user_movies', column: 'movie_id' },
-    { table: 'list_movies', column: 'movie_id' },
-  ]);
-  const shows = await scopedTitles('tv_shows', TV_VOTE_FLOOR, [
-    { table: 'user_tv_shows', column: 'show_id' },
-    { table: 'list_tv_shows', column: 'show_id' },
-  ]);
+  const movies = await scopedTitles('movies', MOVIE_VOTE_FLOOR, SAVED_SOURCES.movies);
+  const shows = await scopedTitles('tv_shows', TV_VOTE_FLOOR, SAVED_SOURCES.tv_shows);
   console.log(`${movies.length} movies, ${shows.length} shows.`);
 
   const m = await refresh('movie', movies);
