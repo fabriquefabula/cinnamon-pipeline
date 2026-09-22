@@ -16,11 +16,11 @@
 // fetching per view -- is a function invocation on every page load,
 // which is the cost line this project has already had to cut once.
 //
-// Scope: titles a visitor can actually reach (the same vote floors the
-// site's own rows use), plus anything any user has saved, so an obscure
-// film someone put on their watchlist still shows availability. About
-// 14,000 of the 62,000 in the catalogue. Availability churns constantly,
-// so a daily call for a title nobody can find is pure waste.
+// Scope: titles a visitor can actually reach, plus anything any user has
+// saved, so an obscure film someone put on their watchlist still shows
+// availability. About 17,500 of the 78,000 in the catalogue.
+// Availability churns constantly, so a daily call for a title nobody can
+// find is pure waste.
 //
 // Required env vars: TMDB_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
@@ -30,10 +30,17 @@ const TMDB_API_KEY = requireEnv('TMDB_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
-// Kept in step with the floors the site uses for "visible": 300 for
-// film, 180 for TV, where TV vote counts run structurally lower.
+// Reachable means the LOWEST floor any surface uses, which is not the
+// floor the site's rows use -- the mistake this started with. Discover
+// admits TV from 50 votes, so a floor of 180 here left 3,446 of the
+// 6,199 shows Discover can return with no availability ever fetched,
+// while film, whose Discover floor of 400 sits above this job's 300,
+// came out 99% covered and gave no sign anything was wrong.
+//
+// So: whenever a surface is given a lower floor than these, this is the
+// other half of that change.
 const MOVIE_VOTE_FLOOR = 300;
-const TV_VOTE_FLOOR = 180;
+const TV_VOTE_FLOOR = 50;
 
 const CONCURRENCY = 20; // same as the other TMDB jobs
 // 100, not 500. The first working run wrote 9,051 rows and failed
@@ -110,13 +117,27 @@ async function scopedTitles(
       .range(from, to),
   );
 
+  // Paged, not limited. A flat .limit() here silently stops adding
+  // saved titles the moment one of these tables outgrows it, and the
+  // only symptom is availability quietly missing from somebody's
+  // watchlist.
   const savedIds = new Set<string>();
   for (const src of savedFrom) {
-    const { data, error } = await supabase.from(src.table).select(src.column).limit(5000);
-    if (error) throw error;
-    for (const row of data ?? []) {
-      const v = (row as any)[src.column];
-      if (v) savedIds.add(v as string);
+    let from = 0;
+    for (;;) {
+      const { data, error } = await supabase
+        .from(src.table)
+        .select(src.column)
+        .order(src.column, { ascending: true })
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) throw error;
+      const page = data ?? [];
+      for (const row of page) {
+        const v = (row as any)[src.column];
+        if (v) savedIds.add(v as string);
+      }
+      if (page.length < PAGE_SIZE) break;
+      from += PAGE_SIZE;
     }
   }
 

@@ -17,7 +17,7 @@ on:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # Generous: ~14,000 TMDB calls at 20 concurrent. Well inside this,
+    # Generous: ~17,500 TMDB calls at 20 concurrent. Well inside this,
     # but a slow TMDB day should not kill a run most of the way through.
     timeout-minutes: 60
     steps:
