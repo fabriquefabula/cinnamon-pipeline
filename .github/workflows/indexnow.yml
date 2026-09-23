@@ -8,6 +8,31 @@ name: Submit to IndexNow
 # Daily rather than on deploy, because a shelf is a row in a table: new
 # ones appear with no deploy at all, and a schedule catches those while
 # a deploy hook would not.
+#
+# This job now talks to api.indexnow.org directly instead of going
+# through /api/indexnow on the site. That route sits behind
+# REVALIDATE_SECRET and answered 503 for as long as the secret was unset
+# in Vercel, which took the entire reach mechanism down for a reason
+# that has nothing to do with IndexNow. Nothing in a submission is
+# privileged: the key is public by design -- it is served at /<key>.txt
+# precisely so that anyone can read it and confirm who controls the host
+# -- so gating it behind a shared secret bought no security and cost
+# availability. The route stays in the web repo for manual use.
+#
+# Two URL sets go out together:
+#
+#   1. Sitemap 0 in full: static pages, both genre taxonomies, every
+#      collection and every shelf. A few hundred pages that each say
+#      something a search engine cannot get elsewhere. Read from the
+#      live sitemap rather than listed here, so a shelf added with an
+#      INSERT is submitted the next morning with no change to this file.
+#
+#   2. A rotating slice of the like-pages. All 18,488 of them at once
+#      from a domain with no history reads as exactly what it looks
+#      like, so 2,000 a day go out in a deterministic rotation that
+#      covers the whole set in about ten days and then starts again.
+#      The offset is derived from the day of the year, so a re-run on
+#      the same day repeats the same slice rather than skipping ahead.
 
 on:
   schedule:
@@ -19,34 +44,181 @@ on:
 jobs:
   submit:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: POST to /api/indexnow
+      - name: Collect URLs and submit
         run: |
-          # -L because cinnamondb.com 308-redirects to www and curl does
-          # not follow by default. That exact omission made the first
-          # homepage revalidation run report 308 and do nothing.
-          status=$(curl -sS -L --max-time 60 -o /tmp/body -w '%{http_code}' \
-            -X POST \
-            -H "x-revalidate-secret: ${{ secrets.REVALIDATE_SECRET }}" \
-            https://www.cinnamondb.com/api/indexnow)
+          python3 - <<'PY'
+          import html
+          import json
+          import re
+          import sys
+          import urllib.error
+          import urllib.request
+          from datetime import datetime, timezone
 
-          echo "HTTP $status"
-          cat /tmp/body
-          echo
+          HOST = "www.cinnamondb.com"
+          BASE = "https://" + HOST
+          KEY = "4f167d4534a66d392db99db6cd7d68a4"
+          INDEX = BASE + "/sitemap-index.xml"
+          ENDPOINT = "https://api.indexnow.org/indexnow"
 
-          if [ "$status" != "200" ]; then
-            echo "::error::IndexNow submission returned HTTP $status"
-            exit 1
-          fi
+          # IndexNow caps a single submission at 10,000 URLs.
+          LIKE_SLICE = 2000
+          # Sitemap 0 carries roughly 500 URLs. A collapse to double
+          # digits means a table read came back empty, which otherwise
+          # looks exactly like a healthy run.
+          CORE_FLOOR = 100
 
-          # The route reports how many URLs it sent. Zero means the
-          # shelves query came back empty, which is a failure that would
-          # otherwise look exactly like success.
-          submitted=$(grep -o '"submitted":[0-9]*' /tmp/body | cut -d: -f2)
-          if [ -z "$submitted" ] || [ "$submitted" -lt 10 ]; then
-            echo "::error::Only ${submitted:-0} URLs submitted -- expected hundreds"
-            exit 1
-          fi
+          LOC = re.compile(r"<loc>\s*([^<]+?)\s*</loc>")
 
-          echo "Submitted $submitted URLs."
+
+          def fail(msg):
+              print("::error::" + msg)
+              sys.exit(1)
+
+
+          def get(url, timeout=60):
+              req = urllib.request.Request(
+                  url, headers={"User-Agent": "cinnamondb-indexnow/1 (+https://www.cinnamondb.com)"}
+              )
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  return r.status, r.headers.get("Content-Type", ""), r.read().decode("utf-8", "replace")
+
+
+          def locs(xml):
+              # Next.js escapes & in sitemap URLs; genre slugs are already
+              # percent-encoded, but unescaping is what makes that a fact
+              # rather than a hope.
+              return [html.unescape(u) for u in LOC.findall(xml)]
+
+
+          # -- Preflight -------------------------------------------------
+          # A wrong key file makes every submission answer 403 with no
+          # explanation, so it is checked here where the failure names
+          # itself rather than at the endpoint where it does not.
+          try:
+              status, ctype, body = get(BASE + "/" + KEY + ".txt", timeout=30)
+          except urllib.error.HTTPError as e:
+              fail("key file returned HTTP %s -- IndexNow cannot verify ownership" % e.code)
+          except Exception as e:  # noqa: BLE001
+              fail("key file unreachable: %s" % e)
+
+          if body.strip() != KEY:
+              fail("key file body is %r, expected the bare key" % body[:80])
+          if "text/plain" not in ctype:
+              fail("key file served as %r, must be text/plain" % ctype)
+          print("Key file verifies.")
+
+          # -- Sitemap index ---------------------------------------------
+          try:
+              _, _, index_xml = get(INDEX)
+          except Exception as e:  # noqa: BLE001
+              fail("sitemap index unreachable: %s" % e)
+
+          children = locs(index_xml)
+          if not children:
+              fail("sitemap index listed no child sitemaps")
+          print("Sitemap index lists %d children." % len(children))
+
+          # -- Core set: sitemap 0 ---------------------------------------
+          zero = [c for c in children if c.rstrip("/").endswith("/0.xml")]
+          if not zero:
+              fail("no /0.xml among the %d child sitemaps -- id ranges changed" % len(children))
+
+          _, _, zero_xml = get(zero[0])
+          core = locs(zero_xml)
+          if len(core) < CORE_FLOOR:
+              fail("sitemap 0 held only %d URLs, expected at least %d" % (len(core), CORE_FLOOR))
+          print("Core set: %d URLs." % len(core))
+
+          # -- Rotating set: the like-pages ------------------------------
+          # ids 400-499 are /movies-like, 500-599 are /shows-like. Matched
+          # on the path segment rather than the range arithmetic so a
+          # renumbering fails loudly here instead of silently submitting
+          # the wrong bucket.
+          like_children = []
+          for c in children:
+              tail = c.rstrip("/").rsplit("/", 1)[-1]
+              num = tail[:-4] if tail.endswith(".xml") else ""
+              if num.isdigit() and 400 <= int(num) < 600:
+                  like_children.append(c)
+
+          like = []
+          for c in sorted(like_children):
+              try:
+                  _, _, xml = get(c)
+              except Exception as e:  # noqa: BLE001
+                  print("::warning::could not read %s: %s" % (c, e))
+                  continue
+              like.extend(locs(xml))
+
+          like = sorted(set(like))
+          rotating = []
+          if like:
+              day = datetime.now(timezone.utc).timetuple().tm_yday
+              start = (day * LIKE_SLICE) % len(like)
+              # Wraps, so the final slice of a cycle is full rather than
+              # a short tail that leaves the last few hundred pages
+              # submitted less often than the rest.
+              doubled = like + like
+              rotating = doubled[start : start + LIKE_SLICE]
+              print(
+                  "Rotating set: %d of %d like-pages, offset %d (day %d)."
+                  % (len(rotating), len(like), start, day)
+              )
+          else:
+              print("::warning::no like-page sitemaps found -- submitting the core set only")
+
+          # -- Submit ----------------------------------------------------
+          seen = set()
+          url_list = []
+          for u in core + rotating:
+              if u.startswith(BASE + "/") or u == BASE:
+                  if u not in seen:
+                      seen.add(u)
+                      url_list.append(u)
+              else:
+                  # IndexNow rejects the whole submission with 422 if one
+                  # URL is off-host, which is how the apex/www split would
+                  # show up if it ever came back.
+                  print("::warning::dropping off-host URL %s" % u)
+
+          url_list = url_list[:10000]
+          print("Submitting %d URLs." % len(url_list))
+
+          payload = json.dumps(
+              {
+                  "host": HOST,
+                  "key": KEY,
+                  "keyLocation": BASE + "/" + KEY + ".txt",
+                  "urlList": url_list,
+              }
+          ).encode("utf-8")
+
+          req = urllib.request.Request(
+              ENDPOINT,
+              data=payload,
+              headers={"Content-Type": "application/json; charset=utf-8"},
+              method="POST",
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  code, resp = r.status, r.read().decode("utf-8", "replace")[:500]
+          except urllib.error.HTTPError as e:
+              code, resp = e.code, e.read().decode("utf-8", "replace")[:500]
+          except Exception as e:  # noqa: BLE001
+              fail("IndexNow unreachable: %s" % e)
+
+          print("IndexNow HTTP %s %s" % (code, resp))
+
+          # 200 and 202 are both success; the body is empty either way, so
+          # the status is the whole report. 403 is the key file, 422 is a
+          # URL that does not belong to the host, 429 is too many
+          # submissions.
+          if code not in (200, 202):
+              fail("IndexNow returned HTTP %s: %s" % (code, resp))
+
+          print("Submitted %d URLs." % len(url_list))
+          PY
