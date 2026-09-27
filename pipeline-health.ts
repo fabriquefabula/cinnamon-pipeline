@@ -10,9 +10,14 @@
 // per-run logging cannot detect it by construction -- but the thing it was
 // supposed to produce going stale can be detected, whatever the cause.
 //
+// TWO STATES ONLY: pass or fail. There was a 'warn' tier and it was
+// removed, because a row that is neither actionable nor ignorable is the
+// worst of both -- it trains you to skim the output, and the next real
+// failure gets skimmed with it. Anything worth a human's attention fails
+// the run. Everything else is printed as context and nothing more.
+//
 // On any FAIL this process exits non-zero, which fails the workflow and
-// triggers GitHub's own notification to the repository owner. WARN rows
-// are printed and recorded but do not fail the run.
+// triggers GitHub's own notification to the repository owner.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
@@ -45,12 +50,22 @@ const LIMITS = {
   availabilityMaxAge: 48 * HOUR, // daily, 08:30 UTC
   upcomingIngestMaxAge: 48 * HOUR, // daily, 06:00 UTC
   movieRailMaxAge: 48 * HOUR, // daily, 13:00 UTC
-  moviesAwaitingRails: 200,
-  tvAwaitingClusters: 300,
-  tvAwaitingRails: 300,
+
+  // How long a scored row may sit unprocessed before it counts as stuck.
+  //
+  // This replaced three separate limits on queue DEPTH, which measured the
+  // wrong thing. A scoring batch lands several hundred rows at once and the
+  // downstream jobs drain roughly two hundred a day, so a deep queue is the
+  // normal state of a healthy pipeline the night after a batch -- and the
+  // old limits duly failed the run for it. Meanwhile a single row stuck for
+  // thirteen days passed, because one is less than three hundred.
+  //
+  // Both of those happened. Depth says nothing about health; age says all of
+  // it. Three days is one batch's drain time plus a full day of slack.
+  drainMaxAge: 72 * HOUR,
 };
 
-type Severity = 'ok' | 'warn' | 'fail';
+type Severity = 'ok' | 'fail';
 
 interface Check {
   name: string;
@@ -69,8 +84,11 @@ interface Health {
   last_movie_rail: string | null;
   last_tv_rail: string | null;
   movies_awaiting_rails: number;
+  movies_awaiting_rails_oldest: string | null;
   tv_awaiting_clusters: number;
+  tv_awaiting_clusters_oldest: string | null;
   tv_awaiting_rails: number;
+  tv_awaiting_rails_oldest: string | null;
   movies_pending_eligible: number;
   tv_pending_eligible: number;
   movies_orphaned_submitted: number;
@@ -86,34 +104,53 @@ function ageMs(iso: string | null, now: number): number | null {
 
 function fmtAge(ms: number): string {
   const hours = ms / HOUR;
-  return hours < 48 ? `${hours.toFixed(1)}h ago` : `${(ms / DAY).toFixed(1)}d ago`;
+  return hours < 48 ? `${hours.toFixed(1)}h` : `${(ms / DAY).toFixed(1)}d`;
 }
 
-// A freshness check. A null timestamp is reported as 'warn', never 'fail':
-// it means the signal has never been observed, which is the expected state
-// immediately after a new signal is introduced and is not evidence that
-// anything is broken.
+// A freshness check. A null timestamp passes: it means the signal has never
+// been observed, which is the expected state immediately after a new signal
+// is introduced and is not evidence that anything is broken.
 function freshness(name: string, iso: string | null, maxAge: number, now: number): Check {
   const age = ageMs(iso, now);
   if (age === null) {
-    return { name, severity: 'warn', detail: 'never recorded -- no run observed yet' };
+    return { name, severity: 'ok', detail: 'never recorded -- no run observed yet' };
   }
   if (age > maxAge) {
-    return { name, severity: 'fail', detail: `last run ${fmtAge(age)}, limit ${fmtAge(maxAge)}` };
+    return {
+      name,
+      severity: 'fail',
+      detail: `last run ${fmtAge(age)} ago, limit ${fmtAge(maxAge)}`,
+    };
   }
-  return { name, severity: 'ok', detail: `last run ${fmtAge(age)}` };
+  return { name, severity: 'ok', detail: `last run ${fmtAge(age)} ago` };
 }
 
-function backlog(name: string, count: number, limit: number): Check {
-  if (count > limit) {
-    return { name, severity: 'fail', detail: `${count} waiting, limit ${limit}` };
-  }
-  return { name, severity: 'ok', detail: `${count} waiting` };
-}
+// A queue check, judged on how long the oldest row has waited rather than
+// on how many are waiting. See LIMITS.drainMaxAge for why.
+//
+// pipeline_health() only counts a row as awaiting if no run of the relevant
+// job has completed since it was scored -- so rows the job has already seen
+// and declined, because nothing in the catalogue is near them, never reach
+// this function.
+function drain(name: string, count: number, oldest: string | null, now: number): Check {
+  if (count === 0) return { name, severity: 'ok', detail: 'empty' };
 
-function warnIfAny(name: string, count: number, note: string): Check {
-  if (count > 0) return { name, severity: 'warn', detail: `${count} ${note}` };
-  return { name, severity: 'ok', detail: 'none' };
+  const age = ageMs(oldest, now);
+  if (age === null) {
+    // Waiting rows with no scored timestamp. Nothing to judge age by, so
+    // this passes rather than guessing -- but it is worth seeing.
+    return { name, severity: 'ok', detail: `${count} waiting, age unknown` };
+  }
+  if (age > LIMITS.drainMaxAge) {
+    return {
+      name,
+      severity: 'fail',
+      detail:
+        `${count} waiting, oldest ${fmtAge(age)} -- limit ${fmtAge(LIMITS.drainMaxAge)}. ` +
+        `Not a backlog, a stall: rows this old will not clear on their own.`,
+    };
+  }
+  return { name, severity: 'ok', detail: `${count} waiting, oldest ${fmtAge(age)}, draining` };
 }
 
 function evaluate(h: Health): Check[] {
@@ -133,13 +170,9 @@ function evaluate(h: Health): Check[] {
     freshness('availability_refresh', h.last_availability_refresh, LIMITS.availabilityMaxAge, now),
     freshness('movie_rails', h.last_movie_rail, LIMITS.movieRailMaxAge, now),
 
-    backlog('movies_awaiting_rails', h.movies_awaiting_rails, LIMITS.moviesAwaitingRails),
-    // 300, not 50. The weekly TV collect lands a few hundred newly
-    // scored shows in one go, and they sit unclustered until the next
-    // daily assignment run hours later -- a backlog that clears itself,
-    // not a fault. At 50 this failed every week for a normal cadence.
-    backlog('tv_awaiting_clusters', h.tv_awaiting_clusters, LIMITS.tvAwaitingClusters),
-    backlog('tv_awaiting_rails', h.tv_awaiting_rails, LIMITS.tvAwaitingRails),
+    drain('movies_awaiting_rails', h.movies_awaiting_rails, h.movies_awaiting_rails_oldest, now),
+    drain('tv_awaiting_clusters', h.tv_awaiting_clusters, h.tv_awaiting_clusters_oldest, now),
+    drain('tv_awaiting_rails', h.tv_awaiting_rails, h.tv_awaiting_rails_oldest, now),
   ];
 
   // Stranded in 'submitted' with no open batch left to collect them. These
@@ -165,17 +198,32 @@ function evaluate(h: Health): Check[] {
         : 'none',
   });
 
-  // Informational: these are normal between a submit and its collect.
+  // Context, not verdicts. These numbers are worth reading when something
+  // else has failed and worth nothing on their own, so they never fail the
+  // run: awaiting_scoring is the normal state between a submit and its
+  // collect, and a cluster without a description renders a thinner page
+  // rather than a broken one.
   checks.push({
     name: 'awaiting_scoring',
     severity: 'ok',
     detail: `${h.movies_pending_eligible} movies, ${h.tv_pending_eligible} shows pending eligible`,
   });
-
-  checks.push(warnIfAny('tv_cluster_descriptions', h.tv_clusters_without_description, 'clusters have no description'));
-  checks.push(
-    warnIfAny('movie_cluster_descriptions', h.movie_clusters_without_description, 'clusters have no description'),
-  );
+  checks.push({
+    name: 'tv_cluster_descriptions',
+    severity: 'ok',
+    detail:
+      h.tv_clusters_without_description > 0
+        ? `${h.tv_clusters_without_description} without description`
+        : 'all written',
+  });
+  checks.push({
+    name: 'movie_cluster_descriptions',
+    severity: 'ok',
+    detail:
+      h.movie_clusters_without_description > 0
+        ? `${h.movie_clusters_without_description} without description`
+        : 'all written',
+  });
 
   return checks;
 }
@@ -190,17 +238,14 @@ async function main() {
   const checks = evaluate(health);
 
   const failures = checks.filter((c) => c.severity === 'fail');
-  const warnings = checks.filter((c) => c.severity === 'warn');
 
   const pad = Math.max(...checks.map((c) => c.name.length));
   console.log(`Pipeline health at ${health.checked_at}\n`);
   for (const c of checks) {
-    const tag = c.severity === 'ok' ? 'OK  ' : c.severity === 'warn' ? 'WARN' : 'FAIL';
-    console.log(`${tag}  ${c.name.padEnd(pad)}  ${c.detail}`);
+    console.log(`${c.severity === 'ok' ? 'OK  ' : 'FAIL'}  ${c.name.padEnd(pad)}  ${c.detail}`);
   }
 
-  const summary = `${failures.length} failing, ${warnings.length} warning, ${checks.length} checked`;
-  console.log(`\n${summary}`);
+  console.log(`\n${failures.length} failing, ${checks.length} checked`);
 
   // Recorded so health history is queryable alongside the pipeline's own
   // runs. Best-effort: a logging failure must not change the verdict.
@@ -214,7 +259,13 @@ async function main() {
     rows_processed: checks.length,
     rows_failed: failures.length,
     status: failures.length > 0 ? 'failed' : 'success',
-    error_message: failures.length > 0 ? failures.map((f) => `${f.name}: ${f.detail}`).join('; ').slice(0, 2000) : null,
+    error_message:
+      failures.length > 0
+        ? failures
+            .map((f) => `${f.name}: ${f.detail}`)
+            .join('; ')
+            .slice(0, 2000)
+        : null,
   });
   if (logError) console.error(`pipeline_runs logging failed (non-fatal): ${logError.message}`);
 
