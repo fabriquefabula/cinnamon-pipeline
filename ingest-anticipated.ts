@@ -17,9 +17,7 @@
 // dated ahead but not among the world's 300 most-trafficked upcoming
 // titles, is in none of them. That is precisely where an anticipated
 // film sits in the weeks either side of release: it has a trailer, a
-// cast and press, and no ratings at all. Measured when this was
-// written: Bad Apples, a Saoirse Ronan film, was missing on exactly
-// those grounds.
+// cast and press, and no ratings at all.
 //
 // WHY IT ASKS RATHER THAN FILTERS
 //
@@ -73,23 +71,28 @@ const MIN_PERSON_VOTES = intEnv('MIN_PERSON_VOTES', 2500);
 // the cap is a reason to look, not a normal outcome.
 const MAX_NEW = intEnv('MAX_NEW', 150);
 
-// Behind far enough to actually reach the films that motivated this job.
+// Behind, only far enough to cover the weeks between release and a film
+// gathering its first twenty votes. That is the whole backward gap.
 //
-// 120 days was the first guess and it was wrong in the most pointless
-// way available: Bad Apples -- the Saoirse Ronan film this whole script
-// was written to catch -- released in 2025 and fell outside it. The
-// window was never the volume control. The fame gate and MAX_NEW are.
+// This was briefly widened to three years, to reach Bad Apples -- a 2025
+// release -- and the result was a lesson. Three years of calendar with a
+// notable name attached is not three years of films: it is Disney Parks
+// Magical Christmas Day Parade, twice, plus a Katy Perry special, a
+// National Theatre Live broadcast, a Zepp concert tour, five Demon
+// Slayer television re-edits and a shelf of Hallmark TV movies. 46 of
+// the 66 titles that run took were pre-2026 and most were not films in
+// any sense this catalogue means.
 //
-// Widening backwards is close to free, because a film that old with a
-// notable lead has almost always cleared ingest.ts's twenty-vote floor
-// already, so it is filtered out as existing before anything is
-// hydrated. What is left is exactly the residue worth having: older
-// films with a real name attached that never accumulated votes.
+// A short backward window is doing quiet work: recent junk is rare,
+// three years of junk is not. Anything genuinely worth having that is
+// older than this has had time to clear ingest.ts's vote floor on its
+// own, and anything that has not is a film nobody voted on. The few
+// real exceptions are what ingest-one.ts is for.
 //
 // Ahead, further than ingest-upcoming's 180 days, because a film with a
 // cast attached is announced long before it is marketable and there is
 // no cost to holding it early.
-const BACK_DAYS = intEnv('BACK_DAYS', 1095);
+const BACK_DAYS = intEnv('BACK_DAYS', 120);
 const FORWARD_DAYS = intEnv('FORWARD_DAYS', 365);
 
 // URL length, not a TMDB limit. Twenty-five seven-digit ids plus
