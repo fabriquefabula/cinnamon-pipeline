@@ -6,7 +6,7 @@ on:
       dry_run:
         description: 'Count only, write nothing'
         type: boolean
-        default: true
+        default: false
       min_person_votes:
         description: 'Vote floor for a notable name (default 2500 -> ~5,000 people)'
         type: string
@@ -15,22 +15,23 @@ on:
         description: 'Hard cap on new films this run (default 150)'
         type: string
         default: ''
+  # Narrow on purpose, same as the other ingests: only a change to this
+  # job's own script or this file starts it, so a new or edited ingest is
+  # exercised the moment it lands instead of waiting for the next cron,
+  # and no unrelated commit in the repo triggers a TMDB sweep.
+  push:
+    branches: [main]
+    paths:
+      - 'ingest-anticipated.ts'
+      - '.github/workflows/ingest-anticipated.yml'
   schedule:
     # Weekly rather than daily. The window runs a year ahead, so its
-    # contents change on the timescale of announcements, not hours --
-    # and this is the one ingest whose volume is not bounded by a
-    # popularity rank, so it gets looked at rather than left running
-    # unattended every morning.
+    # contents change on the timescale of announcements, not hours.
     #
     # Wednesday 05:00 UTC: clear of the Monday weekly ingest and an hour
     # before the daily upcoming sweep, so anything new is in the
     # catalogue before the popularity and rail jobs run over it.
     - cron: '0 5 * * 3'
-
-# No push trigger, unlike the other ingests. This one writes rows that
-# become paid scoring work, and the first thing anybody should do after
-# changing a threshold here is dispatch it with dry_run on and read the
-# count -- not have it fire on the commit.
 
 jobs:
   ingest:
@@ -47,7 +48,8 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Empty on the cron run, so the script's own defaults apply.
+          # Unset on the cron and push runs, so the script's own defaults
+          # apply and the run is live.
           DRY_RUN: ${{ inputs.dry_run }}
           MIN_PERSON_VOTES: ${{ inputs.min_person_votes }}
           MAX_NEW: ${{ inputs.max_new }}
