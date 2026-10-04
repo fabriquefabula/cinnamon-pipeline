@@ -101,6 +101,27 @@ const INSERT_BATCH_SIZE = 100;
 const SITE_VISIBLE_VOTES = 300; // kept in step with ingest.ts
 const TOP_BILLED = 5;
 
+// TMDB's genre id for Documentary, excluded at the query.
+//
+// This is the fame gate's one systematic blind spot and it is a big
+// one. A documentary ABOUT a famous person bills that person in its top
+// five, so every making-of, retrospective and celebrity profile passes
+// a test designed to find films built around them. The first live run
+// took 108 films and 40 were exactly this: The Odyssey: The Making of
+// an Epic, Toy Story: 30 Years and Beyond, Generations: The Evolution
+// of Spider-Man, Making Marie Antoinette, Euphoria: A Look Back.
+//
+// A documentary about a film is not the film. Excluded at the query
+// rather than after hydration, so they cost nothing, and checked again
+// below in case the genre only arrives on the detail response.
+const DOCUMENTARY_GENRE_ID = 99;
+
+// Shorts, specials and festival featurettes. Only applied when TMDB
+// actually knows the runtime -- an unreleased film very often has 0 or
+// null there, and treating unknown as disqualifying would throw out the
+// genuine upcoming features this job exists to catch.
+const MIN_FEATURE_RUNTIME = 60;
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 function requireEnv(name: string): string {
@@ -201,6 +222,7 @@ async function discoverForPeople(people: number[], from: string, to: string): Pr
       const data = await tmdbGet(
         `/discover/movie?with_people=${withPeople}` +
           `&primary_release_date.gte=${from}&primary_release_date.lte=${to}` +
+          `&without_genres=${DOCUMENTARY_GENRE_ID}` +
           `&sort_by=primary_release_date.asc&page=${page}`,
       );
       if (!data?.results?.length) break;
@@ -281,6 +303,19 @@ async function hydrate(tmdbId: number, notable: Set<number>): Promise<Candidate 
   if (!d.poster_path) return null;
   if (!d.overview || d.overview.trim().length === 0) return null;
   if (!d.release_date) return null;
+
+  // Re-checked here as well as at the query: without_genres filters on
+  // what /discover knows, and a title can arrive with its genres only
+  // populated on the detail response.
+  const genreIds: number[] = (d.genres ?? []).map((g: any) => g.id);
+  if (genreIds.includes(DOCUMENTARY_GENRE_ID)) return null;
+
+  // No genre at all means scoring_eligible would be false anyway, so
+  // the row would sit in the catalogue reachable and unscored forever.
+  if ((d.genres?.length ?? 0) === 0) return null;
+
+  // Known-short only. See MIN_FEATURE_RUNTIME.
+  if (d.runtime && d.runtime < MIN_FEATURE_RUNTIME) return null;
 
   const castRaw: any[] = d.credits?.cast ?? [];
   const crewRaw: any[] = d.credits?.crew ?? [];
@@ -395,7 +430,7 @@ async function main() {
 
   console.log(
     `\n${taken} films pass the top-billing check, ${rejected} rejected ` +
-      `(bit-part match, or failed the clean-data gate).`,
+      `(documentary, short, bit-part match, or failed the clean-data gate).`,
   );
 
   if (DRY_RUN) {
