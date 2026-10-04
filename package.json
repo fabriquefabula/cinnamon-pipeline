@@ -8,6 +8,8 @@
     "ingest-tv": "tsx ingest-tv.ts",
     "ingest-tv-credits": "tsx ingest-tv-credits.ts",
     "ingest-upcoming": "tsx ingest-upcoming.ts",
+    "ingest-anticipated": "tsx ingest-anticipated.ts",
+    "ingest-one": "tsx ingest-one.ts",
     "cluster-movies": "tsx cluster-movies.ts",
     "cluster-tv": "tsx cluster-tv.ts",
     "assign-movie-clusters": "tsx assign-movie-clusters.ts",

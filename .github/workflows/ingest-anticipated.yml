@@ -1,0 +1,53 @@
+name: Ingest Anticipated Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Count only, write nothing'
+        type: boolean
+        default: true
+      min_person_votes:
+        description: 'Vote floor for a notable name (default 2500 -> ~5,000 people)'
+        type: string
+        default: ''
+      max_new:
+        description: 'Hard cap on new films this run (default 150)'
+        type: string
+        default: ''
+  schedule:
+    # Weekly rather than daily. The window runs a year ahead, so its
+    # contents change on the timescale of announcements, not hours --
+    # and this is the one ingest whose volume is not bounded by a
+    # popularity rank, so it gets looked at rather than left running
+    # unattended every morning.
+    #
+    # Wednesday 05:00 UTC: clear of the Monday weekly ingest and an hour
+    # before the daily upcoming sweep, so anything new is in the
+    # catalogue before the popularity and rail jobs run over it.
+    - cron: '0 5 * * 3'
+
+# No push trigger, unlike the other ingests. This one writes rows that
+# become paid scoring work, and the first thing anybody should do after
+# changing a threshold here is dispatch it with dry_run on and read the
+# count -- not have it fire on the commit.
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run ingest-anticipated
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Empty on the cron run, so the script's own defaults apply.
+          DRY_RUN: ${{ inputs.dry_run }}
+          MIN_PERSON_VOTES: ${{ inputs.min_person_votes }}
+          MAX_NEW: ${{ inputs.max_new }}

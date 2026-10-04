@@ -1,0 +1,41 @@
+name: Ingest by TMDB id
+
+# Hand-run only. There is no schedule and no push trigger, because the
+# whole point of this one is that a person decided a specific title
+# should be in the catalogue.
+#
+# The id is the number in a TMDB URL:
+# themoviedb.org/movie/1198654-bad-apples -> 1198654. Pasting the whole
+# URL works too.
+on:
+  workflow_dispatch:
+    inputs:
+      tmdb_ids:
+        description: 'TMDB ids or URLs, comma or space separated'
+        type: string
+        required: true
+      medium:
+        description: 'Which catalogue'
+        type: choice
+        options:
+          - movie
+          - tv
+        default: movie
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run ingest-one
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TMDB_IDS: ${{ inputs.tmdb_ids }}
+          MEDIUM: ${{ inputs.medium }}
