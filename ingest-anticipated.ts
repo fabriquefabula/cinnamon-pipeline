@@ -188,31 +188,37 @@ async function runWithConcurrency<T, R>(
 
 // ------------------------------------------------------------- the list
 
-// Paged deliberately. PostgREST applies a maximum rows per response,
-// and a function returning five thousand rows comes back silently
-// truncated to whatever that ceiling is -- which would not error, would
-// not warn, and would quietly cut the people list to a fraction of
-// itself. The job would keep working and keep missing films, which is
-// the failure mode this whole script exists to fix.
+// ONE call, deliberately.
+//
+// This was briefly paged, on the theory that PostgREST would silently
+// truncate a five-thousand-row response at some ceiling. It killed the
+// job: PostgREST re-evaluates the whole function for every page, and
+// notable_people takes about 2.6 seconds, so six pages was sixteen
+// seconds of database time and the statement timeout cancelled it --
+// 'canceling statement due to statement timeout', nine seconds in,
+// before a single film had been looked at.
+//
+// Supabase does not set db-max-rows, so there is no ceiling to defeat.
+// Instead of paging, the count is checked: a result landing exactly on
+// a round number is the signature of a cap, and worth shouting about
+// rather than quietly running on a fraction of the list.
 async function loadNotablePeople(): Promise<number[]> {
-  const ids: number[] = [];
-  const page = 1000;
-  for (let offset = 0; ; offset += page) {
-    const { data, error } = await supabase
-      .rpc('notable_people', { p_min_votes: MIN_PERSON_VOTES })
-      .select('tmdb_person_id')
-      .range(offset, offset + page - 1);
-    if (error) throw error;
-    const batch = ((data ?? []) as { tmdb_person_id: number }[])
-      .map((r) => r.tmdb_person_id)
-      .filter((id): id is number => typeof id === 'number');
-    ids.push(...batch);
-    if (batch.length < page) break;
-    // A function this size should never need fifty pages; if it does,
-    // something is wrong with the range rather than with the data.
-    if (offset > 200_000) throw new Error('notable_people paging did not terminate');
-  }
+  const { data, error } = await supabase.rpc('notable_people', {
+    p_min_votes: MIN_PERSON_VOTES,
+  });
+  if (error) throw error;
+
+  const ids = ((data ?? []) as { tmdb_person_id: number }[])
+    .map((r) => r.tmdb_person_id)
+    .filter((id): id is number => typeof id === 'number');
+
   if (ids.length === 0) throw new Error('notable_people returned nobody -- refusing to run');
+  if (ids.length % 1000 === 0) {
+    console.warn(
+      `WARNING: got exactly ${ids.length} people, which looks like a row cap rather than an ` +
+        `answer. The gate may be running on a fraction of the list.`,
+    );
+  }
   return ids;
 }
 
