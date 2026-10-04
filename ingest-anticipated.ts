@@ -142,14 +142,30 @@ async function runWithConcurrency<T, R>(
 
 // ------------------------------------------------------------- the list
 
+// Paged deliberately. PostgREST applies a maximum rows per response,
+// and a function returning five thousand rows comes back silently
+// truncated to whatever that ceiling is -- which would not error, would
+// not warn, and would quietly cut the people list to a fraction of
+// itself. The job would keep working and keep missing films, which is
+// the failure mode this whole script exists to fix.
 async function loadNotablePeople(): Promise<number[]> {
-  const { data, error } = await supabase.rpc('notable_people', {
-    p_min_votes: MIN_PERSON_VOTES,
-  });
-  if (error) throw error;
-  const ids = ((data ?? []) as { tmdb_person_id: number }[])
-    .map((r) => r.tmdb_person_id)
-    .filter((id): id is number => typeof id === 'number');
+  const ids: number[] = [];
+  const page = 1000;
+  for (let offset = 0; ; offset += page) {
+    const { data, error } = await supabase
+      .rpc('notable_people', { p_min_votes: MIN_PERSON_VOTES })
+      .select('tmdb_person_id')
+      .range(offset, offset + page - 1);
+    if (error) throw error;
+    const batch = ((data ?? []) as { tmdb_person_id: number }[])
+      .map((r) => r.tmdb_person_id)
+      .filter((id): id is number => typeof id === 'number');
+    ids.push(...batch);
+    if (batch.length < page) break;
+    // A function this size should never need fifty pages; if it does,
+    // something is wrong with the range rather than with the data.
+    if (offset > 200_000) throw new Error('notable_people paging did not terminate');
+  }
   if (ids.length === 0) throw new Error('notable_people returned nobody -- refusing to run');
   return ids;
 }
