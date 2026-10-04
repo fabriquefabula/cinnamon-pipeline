@@ -73,11 +73,23 @@ const MIN_PERSON_VOTES = intEnv('MIN_PERSON_VOTES', 2500);
 // the cap is a reason to look, not a normal outcome.
 const MAX_NEW = intEnv('MAX_NEW', 150);
 
-// Behind, because the post-release pre-votes window is half the gap.
+// Behind far enough to actually reach the films that motivated this job.
+//
+// 120 days was the first guess and it was wrong in the most pointless
+// way available: Bad Apples -- the Saoirse Ronan film this whole script
+// was written to catch -- released in 2025 and fell outside it. The
+// window was never the volume control. The fame gate and MAX_NEW are.
+//
+// Widening backwards is close to free, because a film that old with a
+// notable lead has almost always cleared ingest.ts's twenty-vote floor
+// already, so it is filtered out as existing before anything is
+// hydrated. What is left is exactly the residue worth having: older
+// films with a real name attached that never accumulated votes.
+//
 // Ahead, further than ingest-upcoming's 180 days, because a film with a
 // cast attached is announced long before it is marketable and there is
 // no cost to holding it early.
-const BACK_DAYS = intEnv('BACK_DAYS', 120);
+const BACK_DAYS = intEnv('BACK_DAYS', 1095);
 const FORWARD_DAYS = intEnv('FORWARD_DAYS', 365);
 
 // URL length, not a TMDB limit. Twenty-five seven-digit ids plus
