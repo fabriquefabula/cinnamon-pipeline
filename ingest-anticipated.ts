@@ -80,9 +80,22 @@ const MAX_NEW = intEnv('MAX_NEW', 150);
 const BACK_DAYS = intEnv('BACK_DAYS', 120);
 const FORWARD_DAYS = intEnv('FORWARD_DAYS', 365);
 
-// URL length, not a TMDB limit. Sixty seven-digit ids plus separators is
-// a safe query string; a few hundred is not.
-const PEOPLE_PER_QUERY = 60;
+// URL length, not a TMDB limit. Twenty-five seven-digit ids plus
+// separators is a comfortable query string; a few hundred is not.
+const PEOPLE_PER_QUERY = 25;
+
+// Hard stop on pagination per group, and the reason this exists: the
+// first version let each group run to TMDB's 500-page ceiling. If
+// with_people is ever ignored or mis-spelled, every query returns the
+// entire release calendar instead of one group's films, and 500 pages
+// times two hundred groups is forty thousand sequential requests -- a
+// job that grinds until the workflow timeout kills it and writes
+// nothing. Measured against the real shape of the data this is
+// generous: twenty-five people with a film or two each inside the
+// window is two or three pages.
+const MAX_PAGES_PER_GROUP = 10;
+const DISCOVER_CONCURRENCY = 8;
+
 const CONCURRENCY = 20; // as the other ingests -- well under TMDB's soft limit
 const INSERT_BATCH_SIZE = 100;
 const SITE_VISIBLE_VOTES = 300; // kept in step with ingest.ts
@@ -173,24 +186,52 @@ async function loadNotablePeople(): Promise<number[]> {
 // --------------------------------------------------------------- search
 
 async function discoverForPeople(people: number[], from: string, to: string): Promise<number[]> {
-  const found = new Set<number>();
+  const groups = chunk(people, PEOPLE_PER_QUERY);
+  let cappedGroups = 0;
 
-  for (const group of chunk(people, PEOPLE_PER_QUERY)) {
+  const perGroup = await runWithConcurrency(groups, DISCOVER_CONCURRENCY, async (group) => {
+    const ids: number[] = [];
     // | is OR in TMDB's filter syntax; a comma would be AND and would
-    // match nothing, since no film has sixty of these people in it.
-    const withPeople = group.join('|');
-    let page = 1;
-    while (page <= 500) {
+    // match nothing, since no film has twenty-five of these people in
+    // it. Percent-encoded rather than raw: a bare pipe in a query
+    // string is not something to trust every hop to preserve.
+    const withPeople = encodeURIComponent(group.join('|'));
+
+    for (let page = 1; page <= MAX_PAGES_PER_GROUP; page++) {
       const data = await tmdbGet(
         `/discover/movie?with_people=${withPeople}` +
           `&primary_release_date.gte=${from}&primary_release_date.lte=${to}` +
           `&sort_by=primary_release_date.asc&page=${page}`,
       );
       if (!data?.results?.length) break;
-      for (const r of data.results) found.add(r.id);
-      if (page >= (data.total_pages ?? 1)) break;
-      page++;
+      for (const r of data.results) ids.push(r.id);
+      const total = data.total_pages ?? 1;
+      if (page >= total) break;
+      if (page === MAX_PAGES_PER_GROUP) {
+        cappedGroups++;
+        break;
+      }
     }
+
+    return ids;
+  });
+
+  const found = new Set<number>();
+  for (const ids of perGroup) for (const id of ids) found.add(id);
+
+  // Every group hitting the cap means the filter is not filtering --
+  // each query is returning the whole calendar rather than these
+  // people's films. Said loudly, because the symptom otherwise is just
+  // a job that takes too long and a catalogue full of films nobody
+  // recognises.
+  if (cappedGroups > groups.length / 2) {
+    console.warn(
+      `WARNING: ${cappedGroups} of ${groups.length} groups hit the ${MAX_PAGES_PER_GROUP}-page ` +
+        `cap. with_people is probably not being applied -- check the filter before trusting ` +
+        `this run's output.`,
+    );
+  } else if (cappedGroups > 0) {
+    console.log(`${cappedGroups} group(s) hit the page cap; their later films were skipped.`);
   }
 
   return [...found];
