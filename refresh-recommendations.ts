@@ -96,6 +96,15 @@ import { createClient } from '@supabase/supabase-js';
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 const EVENT_NAME = process.env.EVENT_NAME ?? null;
+// Comma-separated rail names to run instead of all five, e.g.
+// RAILS=same_mood. For a targeted recompute when one rail's definition
+// changes and the other four are still correct -- a full run would
+// otherwise rewrite 2.5m rows to fix 500k of them, and cost about
+// twenty hours to do it. Same mechanism as refresh-tv-recommendations.ts.
+const RAILS_FILTER =
+  process.env.RAILS && process.env.RAILS.trim().length > 0
+    ? process.env.RAILS.split(',').map((s) => s.trim()).filter(Boolean)
+    : null;
 
 const TOP_K = 10;
 const NET_SIZE = 100;
@@ -162,13 +171,37 @@ interface RailConfig {
   chunkSize?: number;
 }
 
-const RAILS: RailConfig[] = [
+const ALL_RAILS: RailConfig[] = [
   { name: 'closest_match', rpcName: 'compute_closest_match', extraArgs: { visibility_floor: 250 } },
   { name: 'same_mood', rpcName: 'compute_same_mood', extraArgs: { visibility_floor: 250, top_n_dims: 5 } },
   { name: 'darker_pick', rpcName: 'compute_darker_pick', extraArgs: { visibility_floor: 250, gap_threshold: 15 }, chunkSize: VALENCE_CHUNK_SIZE },
   { name: 'more_accessible', rpcName: 'compute_more_accessible', extraArgs: { visibility_floor: 250, gap_threshold: 15 }, chunkSize: VALENCE_CHUNK_SIZE },
   { name: 'hidden_gem', rpcName: 'compute_hidden_gem', extraArgs: { vote_floor: 250, vote_ceiling: 5000 } },
 ];
+
+// Filtered by ALL_RAILS' order, never the order the names were given, so
+// a reordered RAILS value cannot break the exclusion chain. The chain
+// only reads rails EARLIER than itself, so recomputing a later rail
+// alone is consistent -- recomputing an EARLIER one alone leaves the
+// later rails excluding rows that no longer exist, which surfaces as the
+// same title appearing on two rails at once.
+//
+// An unknown name is a hard error rather than a silent no-op:
+// "RAILS=same-mood" quietly running zero rails and reporting success is
+// the failure worth preventing.
+const RAILS: RailConfig[] = RAILS_FILTER
+  ? ALL_RAILS.filter((r) => RAILS_FILTER.includes(r.name))
+  : ALL_RAILS;
+
+if (RAILS_FILTER) {
+  const known = new Set(ALL_RAILS.map((r) => r.name));
+  const unknown = RAILS_FILTER.filter((n) => !known.has(n));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown rail name(s) in RAILS: ${unknown.join(', ')}. Valid: ${ALL_RAILS.map((r) => r.name).join(', ')}`,
+    );
+  }
+}
 
 interface Progress {
   currentType: string;
@@ -288,6 +321,10 @@ async function main() {
         'Exiting without doing anything. Trigger workflow_dispatch manually to start a fresh run.',
     );
     return;
+  }
+
+  if (RAILS_FILTER) {
+    console.log(`Targeted run: ${RAILS.map((r) => r.name).join(', ')} (of ${ALL_RAILS.length} rails).`);
   }
 
   console.log('Fetching ordered movie list...');
