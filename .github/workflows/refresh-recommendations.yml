@@ -2,6 +2,10 @@ name: Refresh Recommendations (Full)
 
 on:
   workflow_dispatch:
+    inputs:
+      rails:
+        description: 'Rails to run (blank = all 5). e.g. same_mood'
+        required: false
   schedule:
     # Every 6 hours -- longer than the job's own 350min budget, so a
     # scheduled run can't start while the previous one is still going.
@@ -30,3 +34,6 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           EVENT_NAME: ${{ github.event_name }}
+          # Empty on a scheduled run, so a resume always covers every rail
+          # rather than inheriting a previous targeted dispatch.
+          RAILS: ${{ github.event.inputs.rails }}
