@@ -96,6 +96,20 @@ import { createClient } from '@supabase/supabase-js';
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 const EVENT_NAME = process.env.EVENT_NAME ?? null;
+
+// Forces a fresh full walk even when bulk_compute_progress still says a
+// run is in progress. A cancelled Actions job is killed before it can
+// clear is_running, so the flag stays true with a cursor parked mid-walk
+// -- and the resume branch below then starts from that cursor, silently
+// skipping every rail earlier in the chain. That is not a hypothetical:
+// a dispatch resumed inside hidden_gem, completed only that rail, and
+// marked the walk DONE with four rails never recomputed.
+//
+// Deliberately an explicit opt-in rather than making every dispatch
+// fresh: a run that stops at its time budget sets is_running=true on
+// purpose, and a dispatch is the normal way to continue it.
+const FRESH =
+  (process.env.FRESH ?? '').trim().toLowerCase() === 'true';
 // Comma-separated rail names to run instead of all five, e.g.
 // RAILS=same_mood. For a targeted recompute when one rail's definition
 // changes and the other four are still correct -- a full run would
@@ -334,7 +348,7 @@ async function main() {
   let railStartIndex: number;
   let resumeFromIndex: number;
 
-  if (progress.isRunning) {
+  if (progress.isRunning && !FRESH) {
     railStartIndex = RAILS.findIndex((r) => r.name === progress.currentType);
     if (railStartIndex === -1) railStartIndex = 0;
     if (progress.cursorId) {
@@ -349,7 +363,11 @@ async function main() {
   } else {
     railStartIndex = 0;
     resumeFromIndex = 0;
-    console.log('Starting a fresh full run (manual trigger).');
+    console.log(
+      FRESH && progress.isRunning
+        ? 'FRESH=true: discarding the in-progress checkpoint and starting a full run from the top.'
+        : 'Starting a fresh full run (manual trigger).',
+    );
     await refreshRecurrencePenalty('pre-walk');
   }
 
