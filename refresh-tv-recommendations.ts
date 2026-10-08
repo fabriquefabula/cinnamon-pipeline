@@ -84,41 +84,6 @@ function requireEnv(name: string): string {
   return v;
 }
 
-// Populates the magnet suppressor. Every compute_* rail reads its
-// penalty table as "left join ... coalesce(penalty_multiplier, 1.0)", so
-// an EMPTY table is indistinguishable from a catalogue with no magnets
-// in it -- and both tables WERE empty, against 2.5m stored film picks
-// and 545k show picks, because nothing in this pipeline ever called
-// this. The whole mechanism had therefore never applied to anything:
-// Very Good Girls (459 votes) was being recommended 1,249 times across
-// the five film rails while its correct multiplier is 0.0.
-//
-// One RPC refreshes both the film and television tables, so whichever
-// script runs covers both.
-//
-// It reads the stored graph to penalise the next one, which makes it a
-// feedback loop needing two passes to settle: once before the walk,
-// suppressing the magnets the current graph reveals, and once at
-// completion, so the next run starts from an accurate picture.
-// Refreshing only at the end would leave the penalties describing a
-// graph that has already been replaced.
-//
-// Deliberately NOT called on a resume. A mid-walk refresh would read a
-// half-replaced graph and penalise titles on evidence being rewritten as
-// it reads -- the rails already walked would be counted under the new
-// rules and the rest under the old ones, giving every title in the
-// second half an inflated appearance count.
-//
-// Non-fatal on failure: a stale penalty table costs recommendation
-// quality, a thrown error costs the whole multi-hour walk.
-async function refreshRecurrencePenalty(when: string): Promise<void> {
-  console.log(`Refreshing recurrence penalties (${when})...`);
-  const { error } = await supabase.rpc('refresh_recurrence_penalty', {});
-  if (error) {
-    console.error(`  WARNING: penalty refresh failed (non-fatal): ${error.message}`);
-  }
-}
-
 interface RailConfig {
   name: string;
   rpcName: string;
@@ -306,7 +271,6 @@ async function main() {
     railStartIndex = 0;
     resumeFromIndex = 0;
     console.log('Starting a fresh run (manual trigger).');
-    await refreshRecurrencePenalty('pre-walk');
   }
 
   for (let railIdx = railStartIndex; railIdx < RAILS.length; railIdx++) {
@@ -342,7 +306,6 @@ async function main() {
     console.log(`${rail.name} done: ${totalProcessed} processed.`);
   }
 
-  await refreshRecurrencePenalty('post-walk');
   await saveProgress('DONE', false, 0, orderedShows.length, null, null);
   console.log(RAILS_FILTER ? '\nTargeted rails refreshed.' : '\nAll TV rails fully refreshed.');
 }
