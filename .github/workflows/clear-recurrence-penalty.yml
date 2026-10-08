@@ -1,0 +1,26 @@
+name: Clear Recurrence Penalty
+
+on:
+  workflow_dispatch:
+  # Runs the moment it lands, like the ingests: only a change to this
+  # job's own script or this file starts it.
+  push:
+    branches: [main]
+    paths:
+      - 'clear-recurrence-penalty.ts'
+      - '.github/workflows/clear-recurrence-penalty.yml'
+
+jobs:
+  clear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npx tsx clear-recurrence-penalty.ts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
