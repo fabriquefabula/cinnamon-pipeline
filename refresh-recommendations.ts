@@ -293,8 +293,27 @@ function isTimeoutError(message: string): boolean {
   return /statement timeout/i.test(message);
 }
 
-async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
-  const { data, error } = await supabase.rpc(rail.rpcName, {
+// A 5xx from Supabase's edge -- a Cloudflare 520/502/503/504 page comes
+// back as the error text, starting <!DOCTYPE html> -- or a dropped
+// connection means the database was briefly unreachable, not that the
+// rail is wrong. The 8 October run died on exactly one of these, 20,790
+// films into hidden_gem and three hours into the job. They are retried
+// with a growing wait (30s, 1m, 2m, 4m, 8m) before the walk gives up.
+const TRANSIENT_RETRIES = 5;
+const TRANSIENT_FIRST_WAIT_MS = 30 * 1000;
+
+function isTransientError(message: string): boolean {
+  return /<!DOCTYPE html|<html|\b(?:502|503|504|520|521|522|523|524|525|526|530)\b|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(
+    message,
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function callRail(rail: RailConfig, ids: string[]) {
+  return supabase.rpc(rail.rpcName, {
     top_k: TOP_K,
     net_size: NET_SIZE,
     movie_limit: null,
@@ -304,6 +323,19 @@ async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
     p_specific_ids: ids,
     ...rail.extraArgs,
   });
+}
+
+async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
+  let result = await callRail(rail, ids);
+  for (let attempt = 1; result.error && isTransientError(result.error.message) && attempt <= TRANSIENT_RETRIES; attempt++) {
+    const wait = TRANSIENT_FIRST_WAIT_MS * 2 ** (attempt - 1);
+    console.log(
+      `  database unreachable on chunk of ${ids.length} -- retry ${attempt}/${TRANSIENT_RETRIES} in ${wait / 1000}s`,
+    );
+    await sleep(wait);
+    result = await callRail(rail, ids);
+  }
+  const { data, error } = result;
 
   if (!error) return data as number;
 
@@ -320,7 +352,9 @@ async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
     return 0;
   }
 
-  throw new Error(`${rail.rpcName} failed on a non-timeout error: ${error.message}`);
+  // Cut short because an edge error is a whole HTML page, which buried
+  // the one line that mattered under a hundred lines of markup.
+  throw new Error(`${rail.rpcName} failed on a non-timeout error: ${error.message.slice(0, 300)}`);
 }
 
 async function main() {
@@ -412,9 +446,14 @@ async function main() {
 main().catch(async (err) => {
   console.error('Fatal error:', err);
   try {
+    // is_running is left as it is. The checkpoint is still good, so the
+    // next scheduled run picks the walk up from it and a plain dispatch
+    // does the same. Clearing it used to stop the cron from resuming at
+    // all, and turned the next manual dispatch into a fresh run from the
+    // very first film -- the opposite of what an unticked "fresh" means.
     await supabase
       .from('bulk_compute_progress')
-      .update({ last_error: String(err?.message ?? err), is_running: false })
+      .update({ last_error: String(err?.message ?? err).slice(0, 1000) })
       .eq('id', PROGRESS_ROW_ID);
   } catch {
     // Best effort -- don't mask the original error if this also fails.
