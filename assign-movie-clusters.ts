@@ -63,12 +63,20 @@ async function fetchClusters(): Promise<Cluster[]> {
 async function fetchUnassignedMovies(): Promise<{ id: string; vector: number[] }[]> {
   // Movies scored but not present in movie_cluster_assignments at all --
   // newly scored since the last run of either script.
+  //
+  // Paged in a fixed order. Without the order() each page was a separate
+  // unordered query, so over 124,000 rows some pages overlapped and others
+  // were skipped: movies that already had clusters came back as
+  // "unassigned", and inserting them again hit the primary key and failed
+  // the whole run.
   const assignedIds = new Set<string>();
   let afrom = 0;
   while (true) {
     const { data, error } = await supabase
       .from('movie_cluster_assignments')
       .select('movie_id')
+      .order('movie_id', { ascending: true })
+      .order('cluster_id', { ascending: true })
       .range(afrom, afrom + PAGE_SIZE - 1);
     if (error) throw error;
     const page = data ?? [];
@@ -135,7 +143,11 @@ async function main() {
       const WRITE_CHUNK = 1000;
       for (let i = 0; i < rows.length; i += WRITE_CHUNK) {
         const chunk = rows.slice(i, i + WRITE_CHUNK);
-        const { error } = await supabase.from('movie_cluster_assignments').insert(chunk);
+        // ignoreDuplicates: a pair that already exists is left as it is
+        // rather than failing the run.
+        const { error } = await supabase
+          .from('movie_cluster_assignments')
+          .upsert(chunk, { onConflict: 'movie_id,cluster_id', ignoreDuplicates: true });
         if (error) throw error;
         console.log(`  ${Math.min(i + WRITE_CHUNK, rows.length)}/${rows.length}`);
       }
