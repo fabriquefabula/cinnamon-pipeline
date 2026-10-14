@@ -1,0 +1,38 @@
+name: Send Release Alerts
+
+on:
+  workflow_dispatch:
+  # Runs once whenever the job changes. The first run also makes the
+  # sending keys, which the site needs before anyone can turn alerts on.
+  push:
+    branches: [main]
+    paths:
+      - 'send-release-alerts.ts'
+      - '.github/workflows/send-release-alerts.yml'
+  schedule:
+    # Daily, 14:17 UTC -- afternoon in Europe and morning in the US, after
+    # the day's streaming releases have gone up. Off the hour because
+    # GitHub delays jobs queued at :00.
+    - cron: '17 14 * * *'
+
+# A manual run and the schedule never send at the same time. Each alert
+# is recorded before it goes out anyway; this just keeps the log readable.
+concurrency:
+  group: send-release-alerts
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run send-release-alerts
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
