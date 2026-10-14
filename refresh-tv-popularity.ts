@@ -17,6 +17,9 @@
 // than the one being fixed because it looks like there is simply
 // nothing on.
 //
+// Since October 2026 it also stores when the current season began and
+// the next dated episode -- see fetchFreshValues.
+//
 // Scope: in production, or last aired within 18 months. The 18 is
 // deliberately wider than the 12 the row needs -- last_air_date is
 // itself one of the stale fields, so a tight scope would be deciding
@@ -90,11 +93,32 @@ interface FreshValues {
   in_production: boolean | null;
   number_of_seasons: number | null;
   number_of_episodes: number | null;
+  current_season_air_date: string | null;
+  next_episode_air_date: string | null;
+  next_episode_season: number | null;
+  next_episode_number: number | null;
 }
 
 async function fetchFreshValues(show: ActiveShow): Promise<FreshValues | null> {
   const d = await tmdbGet(`/tv/${show.tmdb_id}`);
   if (!d) return null;
+
+  // When the season now airing began. last_air_date says a show is on;
+  // this says whether what is on is new. Law & Order: SVU aired last
+  // week, but in its 28th season; Lanterns aired last week in its first.
+  // The TV "Popular now" row reads this to mean what the film row means
+  // by a release in the last twelve months.
+  const lastSeason = d.last_episode_to_air?.season_number;
+  const season = Array.isArray(d.seasons)
+    ? d.seasons.find((x: any) => x.season_number === lastSeason)
+    : null;
+
+  // The next episode, if TMDB has one dated. A next episode numbered 1 is
+  // a season premiere, which is how a returning series gets onto the
+  // Upcoming row: most of what people are waiting for on television is
+  // the next season of something they already watch, not a new show.
+  const next = d.next_episode_to_air ?? null;
+
   return {
     id: show.id,
     popularity: d.popularity ?? null,
@@ -107,6 +131,10 @@ async function fetchFreshValues(show: ActiveShow): Promise<FreshValues | null> {
     in_production: typeof d.in_production === 'boolean' ? d.in_production : null,
     number_of_seasons: d.number_of_seasons ?? null,
     number_of_episodes: d.number_of_episodes ?? null,
+    current_season_air_date: season?.air_date || null,
+    next_episode_air_date: next?.air_date || null,
+    next_episode_season: next?.season_number ?? null,
+    next_episode_number: next?.episode_number ?? null,
   };
 }
 
