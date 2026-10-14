@@ -1,11 +1,13 @@
-// Release alerts: a notification on the day something on someone's
-// watchlist comes out -- a film's release, a new series, or a new season
-// of a series already out.
+// Release alerts: a notification on the day something someone liked or
+// put on their watchlist comes out -- a film's release, a new series, or
+// a new season of a series already out.
 //
 // Who gets one: anyone who turned alerts on for a device (a row in
-// push_subscriptions, written by the site's ReleaseAlerts control) and
-// saved the title to their watchlist before the day it came out. A film
-// added on its release day is already known to be out.
+// push_subscriptions, written by the ReleaseAlerts switch on the profile
+// page) and liked the title or put it on their watchlist before the day
+// it came out. A film added on its release day is already known to be out.
+// Liked series matter most here: liking a show is the clearest sign of
+// wanting its next season.
 //
 // The date is checked with TMDB on the day rather than read from the
 // catalogue. The catalogue keeps release dates current only for the 300
@@ -175,6 +177,8 @@ async function fetchDevices(): Promise<Map<string, Device[]>> {
 
 // ---------------------------------------------------------- candidates
 
+type List = 'watchlist' | 'liked';
+
 interface Candidate {
   user_id: string;
   media: 'movie' | 'tv';
@@ -184,13 +188,14 @@ interface Candidate {
   title: string;
   backdrop_url: string | null;
   added_at: string;
+  list: List; // 'watchlist' when it is on both
 }
 
 async function fetchCandidates(filmSince: string): Promise<Candidate[]> {
   const out: Candidate[] = [];
   for (let from = 0; ; from += PAGE_SIZE) {
     const { data, error } = await supabase
-      .rpc('release_alert_candidates', { p_film_since: filmSince })
+      .rpc('release_alert_titles', { p_film_since: filmSince })
       .order('user_id', { ascending: true })
       .order('media', { ascending: true })
       .order('item_id', { ascending: true })
@@ -251,6 +256,7 @@ interface Alert {
   title: string;
   slug: string | null;
   backdrop_url: string | null;
+  list: List;
 }
 
 function alertKey(a: { user_id: string; media: string; item_id: string; event: string }): string {
@@ -263,6 +269,21 @@ function headline(a: Alert, today: string): string {
   if (a.season === 1) return isToday ? `${a.title} starts today` : `${a.title} has started`;
   return isToday ? `${a.title}: season ${a.season} starts today` : `${a.title}: season ${a.season} has started`;
 }
+
+function body(a: Alert): string {
+  if (a.media === 'tv' && a.season === 1) {
+    return a.list === 'liked' ? 'A new series you liked.' : 'A new series on your watchlist.';
+  }
+  if (a.list === 'liked') return a.media === 'tv' ? 'You liked this series.' : 'You liked it.';
+  return 'It’s on your watchlist.';
+}
+
+const LIST_PAGE: Record<string, string> = {
+  'movie:watchlist': '/watchlist',
+  'movie:liked': '/favorites',
+  'tv:watchlist': '/tv/watchlist',
+  'tv:liked': '/tv/favorites',
+};
 
 interface Message {
   alerts: Alert[];
@@ -277,7 +298,7 @@ function messagesFor(alerts: Alert[], today: string): Message[] {
       alerts: [a],
       payload: JSON.stringify({
         title: headline(a, today),
-        body: a.media === 'tv' && a.season === 1 ? 'A new series on your watchlist.' : 'It’s on your watchlist.',
+        body: body(a),
         url: `/${a.media === 'tv' ? 'tv' : 'movie'}/${a.slug ?? a.item_id}`,
         tag: `${a.media}-${a.item_id}-${a.event}`,
         image: a.backdrop_url ? a.backdrop_url.replace('/w1280/', '/w780/') : undefined,
@@ -286,16 +307,26 @@ function messagesFor(alerts: Alert[], today: string): Message[] {
   }
 
   const names = alerts.map((a) => (a.media === 'tv' && a.season && a.season > 1 ? `${a.title} (season ${a.season})` : a.title));
-  let body = names.join(', ');
-  if (body.length > 160) body = `${body.slice(0, 157).replace(/,?\s*[^,]*$/, '')}, and more`;
-  const allTv = alerts.every((a) => a.media === 'tv');
+  let list = names.join(', ');
+  if (list.length > 160) list = `${list.slice(0, 157).replace(/,?\s*[^,]*$/, '')}, and more`;
+
+  // One list page when they all come from the same list, otherwise the
+  // profile page, which shows all four.
+  const pages = new Set(alerts.map((a) => LIST_PAGE[`${a.media}:${a.list}`]));
+  const lists = new Set(alerts.map((a) => a.list));
+  const n = alerts.length;
   return [
     {
       alerts,
       payload: JSON.stringify({
-        title: `${alerts.length} from your watchlist are out`,
-        body,
-        url: allTv ? '/tv/watchlist' : '/watchlist',
+        title:
+          lists.size > 1
+            ? `${n} titles you saved are out`
+            : lists.has('liked')
+              ? `${n} titles you liked are out`
+              : `${n} from your watchlist are out`,
+        body: list,
+        url: pages.size === 1 ? Array.from(pages)[0] : '/profile',
         tag: `release-summary-${today}`,
       }),
     },
@@ -376,6 +407,7 @@ async function main() {
           title: c.title,
           slug: c.slug,
           backdrop_url: c.backdrop_url,
+          list: c.list,
         });
       }
     }
