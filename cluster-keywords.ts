@@ -15,6 +15,14 @@
 // this can reshape the whole group taxonomy. Re-run by hand as the
 // keyword vocabulary grows.
 //
+// The recommendation lists use these groups too: each film's topic
+// profile (movie_topic_vectors -- what its world is about) is built from
+// the groups its keywords fall in. So after writing the new groups this
+// rebuilds every film's profile, in parts so no single call runs past the
+// API's statement timeout. Groups marked in_topic = false (format/meta
+// groups kept out of the profiles) refer to the old groups: after a
+// re-cluster, check which new groups should be left out and mark them again.
+//
 // Required env vars: ANTHROPIC_API_KEY, VOYAGE_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // Optional: DRY_RUN=true, K=<int> (default 200), MIN_KEYWORD_COUNT=<int> (default 15)
 
@@ -363,7 +371,18 @@ async function main() {
     if (memberError) throw memberError;
   }
 
-  console.log(`Done. ${groupRows.length} groups written.`);
+  console.log('Rebuilding topic profiles...');
+  const TOPIC_PARTS = 4;
+  let rebuilt = 0;
+  for (let part = 0; part < TOPIC_PARTS; part++) {
+    const { data: n, error: topicError } = await supabase.rpc('rebuild_topic_vectors', {
+      p_part: part, p_parts: TOPIC_PARTS, p_dims: part === 0,
+    });
+    if (topicError) throw topicError;
+    rebuilt += (n as number) ?? 0;
+  }
+
+  console.log(`Done. ${groupRows.length} groups written, ${rebuilt} topic profiles rebuilt.`);
 }
 
 main().catch((err) => {
