@@ -1,6 +1,7 @@
 // Release alerts: a notification on the day something someone liked or
 // put on their watchlist comes out -- a film's release, a new series, or
-// a new season of a series already out.
+// a new season of a series already out -- and when it starts streaming on
+// a service in their country.
 //
 // Who gets one: anyone who turned alerts on for a device (a row in
 // push_subscriptions, written by the ReleaseAlerts switch on the profile
@@ -16,6 +17,18 @@
 // its old date. For a series the season list gives each season's start
 // date directly, which does not depend on how far TMDB has moved its
 // "next episode" by the time this runs.
+//
+// Streaming: the database keeps a daily history of where every title
+// streams (record_offer_arrivals), and streaming_alert_titles() returns
+// the saved titles that arrived on a free or subscription service in the
+// person's country -- the country their most recently used device
+// reported -- not counting rentals, and not counting a title that was on
+// the service already under another of its names. It must have been
+// saved before the day the new listing could be seen on the site. Each
+// title, service and country is announced once. A title that comes out
+// and starts streaming in the same run gets one notification saying
+// where. A device that has not reported a country yet gets no streaming
+// alerts; it reports one the next time the profile page is opened on it.
 //
 // Each alert is recorded in release_alerts_sent before it goes out, so a
 // second run on the same day sends nothing twice. If every device of that
@@ -59,8 +72,9 @@ const LOOKBACK_DAYS = 2;
 // Films whose stored date is older than this are not checked with TMDB.
 const FILM_CHECK_DAYS = 14;
 
-// More than this many alerts for one person in one run become a single
-// notification listing them.
+// More than this many releases for one person in one run become a single
+// notification listing them; the same, separately, for titles that
+// started streaming.
 const MAX_SEPARATE = 3;
 
 const CONCURRENCY = 10;
@@ -208,6 +222,39 @@ async function fetchCandidates(filmSince: string): Promise<Candidate[]> {
   return out;
 }
 
+// One row per person, saved title and service it arrived on.
+interface StreamingRow {
+  user_id: string;
+  media: 'movie' | 'tv';
+  item_id: string;
+  slug: string | null;
+  title: string;
+  backdrop_url: string | null;
+  list: List;
+  region: string;
+  provider_slug: string;
+  provider_label: string;
+  first_seen: string;
+}
+
+async function fetchStreaming(since: string): Promise<StreamingRow[]> {
+  const out: StreamingRow[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .rpc('streaming_alert_titles', { p_since: since })
+      .order('user_id', { ascending: true })
+      .order('media', { ascending: true })
+      .order('item_id', { ascending: true })
+      .order('provider_slug', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = (data ?? []) as StreamingRow[];
+    out.push(...page);
+    if (page.length < PAGE_SIZE) break;
+  }
+  return out;
+}
+
 // --------------------------------------------------------------- events
 
 interface ReleaseEvent {
@@ -247,9 +294,11 @@ async function eventsFor(
 // --------------------------------------------------------------- alerts
 
 interface Alert {
+  kind: 'release' | 'streaming';
   user_id: string;
   media: 'movie' | 'tv';
   item_id: string;
+  // 'release', 'season-N', or 'streaming:<service>:<country>'
   event: string;
   event_date: string;
   season: number | null;
@@ -257,10 +306,15 @@ interface Alert {
   slug: string | null;
   backdrop_url: string | null;
   list: List;
+  service: string | null; // streaming only: the service's name
 }
 
 function alertKey(a: { user_id: string; media: string; item_id: string; event: string }): string {
   return `${a.user_id}|${a.media}|${a.item_id}|${a.event}`;
+}
+
+function titleKey(a: Alert): string {
+  return `${a.media}:${a.item_id}`;
 }
 
 function headline(a: Alert, today: string): string {
@@ -270,12 +324,40 @@ function headline(a: Alert, today: string): string {
   return isToday ? `${a.title}: season ${a.season} starts today` : `${a.title}: season ${a.season} has started`;
 }
 
+// Which list it is on, said the way the rest of the site says it.
+function whose(a: Alert): string {
+  if (a.list === 'liked') return a.media === 'tv' ? 'You liked this series.' : 'You liked it.';
+  return 'It’s on your watchlist.';
+}
+
 function body(a: Alert): string {
   if (a.media === 'tv' && a.season === 1) {
     return a.list === 'liked' ? 'A new series you liked.' : 'A new series on your watchlist.';
   }
-  if (a.list === 'liked') return a.media === 'tv' ? 'You liked this series.' : 'You liked it.';
-  return 'It’s on your watchlist.';
+  return whose(a);
+}
+
+// "Netflix", "Netflix and Hulu", "Hulu, Netflix and Tubi".
+function services(alerts: Alert[]): string {
+  const names = Array.from(new Set(alerts.map((a) => a.service).filter((s): s is string => !!s))).sort((x, y) =>
+    x.localeCompare(y),
+  );
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+function titleUrl(a: Alert): string {
+  return `/${a.media === 'tv' ? 'tv' : 'movie'}/${a.slug ?? a.item_id}`;
+}
+
+function imageOf(a: Alert): string | undefined {
+  return a.backdrop_url ? a.backdrop_url.replace('/w1280/', '/w780/') : undefined;
+}
+
+// Cut a running list of names at a word boundary so the notification
+// stays readable.
+function clip(list: string): string {
+  return list.length > 160 ? `${list.slice(0, 157).replace(/,?\s*[^,]*$/, '')}, and more` : list;
 }
 
 const LIST_PAGE: Record<string, string> = {
@@ -285,39 +367,51 @@ const LIST_PAGE: Record<string, string> = {
   'tv:liked': '/tv/favorites',
 };
 
+// One list page when they all come from the same list, otherwise the
+// profile page, which shows all four.
+function listPage(alerts: Alert[]): string {
+  const pages = new Set(alerts.map((a) => LIST_PAGE[`${a.media}:${a.list}`]));
+  return pages.size === 1 ? Array.from(pages)[0] : '/profile';
+}
+
 interface Message {
   alerts: Alert[];
   payload: string;
 }
 
+// A release, with the services it streams on when it starts streaming in
+// the same run.
+interface ReleaseItem {
+  alert: Alert;
+  streaming: Alert[];
+}
+
 // Paths, not full addresses: the service worker opens them on whichever
 // address the device signed up on.
-function messagesFor(alerts: Alert[], today: string): Message[] {
-  if (alerts.length <= MAX_SEPARATE) {
-    return alerts.map((a) => ({
-      alerts: [a],
+function releaseMessages(items: ReleaseItem[], today: string): Message[] {
+  if (items.length === 0) return [];
+  if (items.length <= MAX_SEPARATE) {
+    return items.map(({ alert: a, streaming }) => ({
+      alerts: [a, ...streaming],
       payload: JSON.stringify({
         title: headline(a, today),
-        body: body(a),
-        url: `/${a.media === 'tv' ? 'tv' : 'movie'}/${a.slug ?? a.item_id}`,
+        body: streaming.length > 0 ? `Streaming on ${services(streaming)}. ${body(a)}` : body(a),
+        url: titleUrl(a),
         tag: `${a.media}-${a.item_id}-${a.event}`,
-        image: a.backdrop_url ? a.backdrop_url.replace('/w1280/', '/w780/') : undefined,
+        image: imageOf(a),
       }),
     }));
   }
 
-  const names = alerts.map((a) => (a.media === 'tv' && a.season && a.season > 1 ? `${a.title} (season ${a.season})` : a.title));
-  let list = names.join(', ');
-  if (list.length > 160) list = `${list.slice(0, 157).replace(/,?\s*[^,]*$/, '')}, and more`;
-
-  // One list page when they all come from the same list, otherwise the
-  // profile page, which shows all four.
-  const pages = new Set(alerts.map((a) => LIST_PAGE[`${a.media}:${a.list}`]));
-  const lists = new Set(alerts.map((a) => a.list));
-  const n = alerts.length;
+  const releases = items.map((i) => i.alert);
+  const names = releases.map((a) =>
+    a.media === 'tv' && a.season && a.season > 1 ? `${a.title} (season ${a.season})` : a.title,
+  );
+  const lists = new Set(releases.map((a) => a.list));
+  const n = releases.length;
   return [
     {
-      alerts,
+      alerts: items.flatMap((i) => [i.alert, ...i.streaming]),
       payload: JSON.stringify({
         title:
           lists.size > 1
@@ -325,12 +419,69 @@ function messagesFor(alerts: Alert[], today: string): Message[] {
             : lists.has('liked')
               ? `${n} titles you liked are out`
               : `${n} from your watchlist are out`,
-        body: list,
-        url: pages.size === 1 ? Array.from(pages)[0] : '/profile',
+        body: clip(names.join(', ')),
+        url: listPage(releases),
         tag: `release-summary-${today}`,
       }),
     },
   ];
+}
+
+// One message per title, naming every service it arrived on.
+function streamingMessages(groups: Alert[][], today: string): Message[] {
+  if (groups.length === 0) return [];
+  if (groups.length <= MAX_SEPARATE) {
+    return groups.map((g) => {
+      const a = g[0];
+      return {
+        alerts: g,
+        payload: JSON.stringify({
+          title: `${a.title} is now streaming`,
+          body: `On ${services(g)}. ${whose(a)}`,
+          url: titleUrl(a),
+          tag: `${a.media}-${a.item_id}-streaming`,
+          image: imageOf(a),
+        }),
+      };
+    });
+  }
+
+  const firsts = groups.map((g) => g[0]);
+  const lists = new Set(firsts.map((a) => a.list));
+  const n = groups.length;
+  return [
+    {
+      alerts: groups.flat(),
+      payload: JSON.stringify({
+        title:
+          lists.size > 1
+            ? `${n} titles you saved are now streaming`
+            : lists.has('liked')
+              ? `${n} titles you liked are now streaming`
+              : `${n} from your watchlist are now streaming`,
+        body: clip(groups.map((g) => `${g[0].title} (${services(g)})`).join(', ')),
+        url: listPage(firsts),
+        tag: `streaming-summary-${today}`,
+      }),
+    },
+  ];
+}
+
+function messagesFor(alerts: Alert[], today: string): Message[] {
+  const groups = new Map<string, Alert[]>();
+  for (const a of alerts) {
+    if (a.kind !== 'streaming') continue;
+    groups.set(titleKey(a), [...(groups.get(titleKey(a)) ?? []), a]);
+  }
+  // A title that comes out and starts streaming in the same run gets one
+  // notification, saying where.
+  const items: ReleaseItem[] = [];
+  for (const a of alerts) {
+    if (a.kind !== 'release') continue;
+    items.push({ alert: a, streaming: groups.get(titleKey(a)) ?? [] });
+    groups.delete(titleKey(a));
+  }
+  return [...releaseMessages(items, today), ...streamingMessages(Array.from(groups.values()), today)];
 }
 
 type Outcome = 'sent' | 'gone' | 'failed' | 'retry';
@@ -398,6 +549,7 @@ async function main() {
       for (const e of eventsByTitle.get(`${c.media}:${c.item_id}`) ?? []) {
         if (new Date(c.added_at).getTime() >= Date.parse(`${e.date}T00:00:00Z`)) continue;
         due.push({
+          kind: 'release',
           user_id: c.user_id,
           media: c.media,
           item_id: c.item_id,
@@ -408,11 +560,31 @@ async function main() {
           slug: c.slug,
           backdrop_url: c.backdrop_url,
           list: c.list,
+          service: null,
         });
       }
     }
+    const releaseCount = due.length;
+
+    // The database has already applied who, where and since when.
+    for (const s of await fetchStreaming(from)) {
+      due.push({
+        kind: 'streaming',
+        user_id: s.user_id,
+        media: s.media,
+        item_id: s.item_id,
+        event: `streaming:${s.provider_slug}:${s.region}`,
+        event_date: s.first_seen,
+        season: null,
+        title: s.title,
+        slug: s.slug,
+        backdrop_url: s.backdrop_url,
+        list: s.list,
+        service: s.provider_label,
+      });
+    }
     dueCount = due.length;
-    console.log(`${due.length} alerts due.`);
+    console.log(`${due.length} alerts due: ${releaseCount} releases, ${due.length - releaseCount} streaming.`);
 
     if (DRY_RUN) {
       const byUser = new Map<string, Alert[]>();
