@@ -15,15 +15,20 @@
 // the map in one go, so the site never shows half of one week's map and
 // half of another's, or a map without its names.
 //
-// The layout is UMAP's (McInnes, Healy & Melville 2018), written out here
-// rather than taken from a package, for two reasons. It starts from the
-// films' two strongest directions of difference (principal components)
-// instead of from random positions, so the big picture -- light against
-// dark, warm against cold -- holds together instead of being torn into
-// pieces. And it is seeded, so a week in which nothing changed gives the
-// same map. Everything else (neighbourhoods, edge weights, the
-// optimisation and its schedule) follows the reference implementation,
-// umap-learn, step for step.
+// The layout is exact t-SNE (van der Maaten & Hinton 2008), started from
+// the films' two strongest directions of difference (principal
+// components) rather than from random positions, so the big picture --
+// light against dark, warm against cold -- holds together (Kobak & Berens
+// 2019). Every step follows scikit-learn's implementation: neighbourhoods
+// sized by perplexity, early exaggeration, momentum and gains. Nothing in
+// it is random, so a week in which nothing changed gives the same map.
+//
+// Chosen over UMAP after laying out this catalogue both ways: with t-SNE
+// a film's ten closest films on the map are among the ten it feels most
+// like twice as often (43% against 22%), while how far apart the regions
+// sit stays as true to the readings (0.84 against 0.85, rank correlation
+// of distances). Exact rather than approximated (Barnes-Hut): a few
+// thousand films take under a minute.
 //
 // Distances are plain Euclidean on essence_vector_z, the same reading of
 // how alike two films feel that the film-to-film paths use.
@@ -37,20 +42,19 @@ const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 const DRY_RUN = process.env.DRY_RUN === 'true';
 
-// How many films around each film make up its neighbourhood, counting the
-// film itself, as umap-learn does. More pulls the map towards the big
-// picture, fewer towards fine detail.
-const N_NEIGHBORS = 15;
-// How closely films that feel the same may be packed. Near 0 they pile on
-// top of one another; higher spreads them out evenly enough that each one
-// can be picked out and tapped on a phone.
-const MIN_DIST = 0.25;
-const SPREAD = 1.0;
-const N_EPOCHS = 500; // umap-learn's choice for fewer than 10,000 points
-const NEGATIVE_SAMPLE_RATE = 5;
-const REPULSION = 1.0;
-const LEARNING_RATE = 1.0;
-const SEED = 1979;
+// Roughly how many films each film's neighbourhood takes in. Higher keeps
+// more of the big picture, lower more of the fine detail; on this
+// catalogue 50 kept nearly all of 30's fine detail (43% against 44%, as
+// below) with more of the big picture and fewer films piled together.
+const PERPLEXITY = 50;
+const N_ITER = 1000;
+// For the first stretch the pull between neighbours is exaggerated, so
+// films find their groups before the groups settle against one another.
+const EARLY_ITER = 250;
+const EARLY_EXAGGERATION = 12;
+const MOMENTUM_EARLY = 0.5;
+const MOMENTUM = 0.8;
+const MIN_GAIN = 0.01;
 
 // The map runs 0 to MAP_SIZE along its longer side.
 const MAP_SIZE = 10000;
@@ -173,32 +177,12 @@ async function fetchMoods(): Promise<Mood[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Seeded randomness (mulberry32)
-
-function makeRandom(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function gaussian(random: () => number): number {
-  let u = 0;
-  while (u === 0) u = random();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * random());
-}
-
-// ---------------------------------------------------------------------------
 // Neighbourhoods
 
 interface Neighbours {
   k: number; // neighbours per film, not counting the film itself
   idx: Int32Array; // n * k, nearest first
-  dist: Float64Array; // n * k
+  d2: Float64Array; // n * k, squared distances
 }
 
 // Exact nearest neighbours. A few thousand films is small enough to
@@ -207,7 +191,7 @@ function nearestNeighbours(x: Float64Array[], k: number): Neighbours {
   const n = x.length;
   const dims = x[0].length;
   const idx = new Int32Array(n * k).fill(-1);
-  const dist = new Float64Array(n * k).fill(Infinity);
+  const d2 = new Float64Array(n * k).fill(Infinity);
   for (let i = 0; i < n; i++) {
     const xi = x[i];
     const base = i * k;
@@ -220,126 +204,85 @@ function nearestNeighbours(x: Float64Array[], k: number): Neighbours {
         const t = xi[d] - xj[d];
         s += t * t;
       }
-      if (s >= dist[last]) continue;
+      if (s >= d2[last]) continue;
       let p = last;
-      while (p > base && dist[p - 1] > s) {
-        dist[p] = dist[p - 1];
+      while (p > base && d2[p - 1] > s) {
+        d2[p] = d2[p - 1];
         idx[p] = idx[p - 1];
         p--;
       }
-      dist[p] = s;
+      d2[p] = s;
       idx[p] = j;
     }
-    for (let p = base; p <= last; p++) dist[p] = Math.sqrt(dist[p]);
   }
-  return { k, idx, dist };
+  return { k, idx, d2 };
 }
 
-const SMOOTH_K_TOLERANCE = 1e-5;
-const MIN_K_DIST_SCALE = 1e-3;
+interface Affinities {
+  i: Int32Array;
+  j: Int32Array;
+  p: Float64Array; // each unordered pair once; the full symmetric matrix sums to 1
+}
 
-// umap-learn's smooth_knn_dist + compute_membership_strengths: how strongly
-// each film belongs with each of its neighbours, measured against how far
-// away that film's own neighbours are, so films in sparse corners of the
-// catalogue get neighbourhoods just as real as those in crowded ones.
-function memberships(nn: Neighbours, n: number): Float64Array {
-  const { k, dist } = nn;
-  const target = Math.log2(k + 1);
-  let meanAll = 0;
-  for (let p = 0; p < n * k; p++) meanAll += dist[p];
-  meanAll /= n * k;
-
-  const w = new Float64Array(n * k);
+// scikit-learn's _binary_search_perplexity over each film's 3 x PERPLEXITY
+// nearest neighbours: a Gaussian around each film, narrowed until the
+// neighbourhood holds about PERPLEXITY films' worth of weight -- tight
+// where the catalogue is crowded, wide where it is sparse. Then made
+// symmetric, P = (P + P^T) / 2n, as _joint_probabilities_nn does.
+function affinities(nn: Neighbours, n: number): Affinities {
+  const { k, idx, d2 } = nn;
+  const cond = new Float64Array(n * k);
+  const target = Math.log(PERPLEXITY);
   for (let i = 0; i < n; i++) {
     const base = i * k;
-    let rho = 0;
-    for (let p = base; p < base + k; p++) {
-      if (dist[p] > 0) {
-        rho = dist[p];
-        break;
-      }
-    }
-    let lo = 0;
+    let beta = 1;
+    let lo = -Infinity;
     let hi = Infinity;
-    let mid = 1;
-    for (let iter = 0; iter < 64; iter++) {
-      let psum = 0;
+    for (let iter = 0; iter < 100; iter++) {
+      let sum = 0;
       for (let p = base; p < base + k; p++) {
-        const d = dist[p] - rho;
-        psum += d > 0 ? Math.exp(-(d / mid)) : 1;
+        cond[p] = Math.exp(-d2[p] * beta);
+        sum += cond[p];
       }
-      if (Math.abs(psum - target) < SMOOTH_K_TOLERANCE) break;
-      if (psum > target) {
-        hi = mid;
-        mid = (lo + hi) / 2;
+      if (sum === 0) sum = 1e-8;
+      let h = 0;
+      for (let p = base; p < base + k; p++) {
+        cond[p] /= sum;
+        h += d2[p] * cond[p];
+      }
+      const diff = Math.log(sum) + beta * h - target;
+      if (Math.abs(diff) <= 1e-5) break;
+      if (diff > 0) {
+        lo = beta;
+        beta = hi === Infinity ? beta * 2 : (beta + hi) / 2;
       } else {
-        lo = mid;
-        mid = hi === Infinity ? mid * 2 : (lo + hi) / 2;
+        hi = beta;
+        beta = lo === -Infinity ? beta / 2 : (beta + lo) / 2;
       }
-    }
-    let sigma = mid;
-    if (rho > 0) {
-      let mean = 0;
-      for (let p = base; p < base + k; p++) mean += dist[p];
-      mean /= k;
-      if (sigma < MIN_K_DIST_SCALE * mean) sigma = MIN_K_DIST_SCALE * mean;
-    } else if (sigma < MIN_K_DIST_SCALE * meanAll) {
-      sigma = MIN_K_DIST_SCALE * meanAll;
-    }
-    for (let p = base; p < base + k; p++) {
-      const d = dist[p] - rho;
-      w[p] = d <= 0 || sigma === 0 ? 1 : Math.exp(-(d / sigma));
     }
   }
-  return w;
-}
 
-interface Edges {
-  head: Int32Array;
-  tail: Int32Array;
-  weight: Float64Array;
-}
-
-// The neighbourhood graph made symmetric with a fuzzy union (a + b - ab),
-// both directions of every pair kept, and edges too weak to be sampled
-// even once in the whole run dropped -- all as umap-learn does.
-function fuzzyUnion(nn: Neighbours, w: Float64Array, n: number): Edges {
-  const { k, idx } = nn;
-  const directed = new Map<number, number>();
+  const pairs = new Map<number, number>();
   for (let i = 0; i < n; i++) {
     for (let p = i * k; p < i * k + k; p++) {
       const j = idx[p];
-      if (j < 0 || j === i) continue;
-      directed.set(i * n + j, w[p]);
+      const key = Math.min(i, j) * n + Math.max(i, j);
+      pairs.set(key, (pairs.get(key) ?? 0) + cond[p]);
     }
   }
-  const pairs = new Map<number, number>();
-  for (const [key, a] of directed) {
-    const i = Math.floor(key / n);
-    const j = key - i * n;
-    const pk = Math.min(i, j) * n + Math.max(i, j);
-    if (pairs.has(pk)) continue;
-    const b = directed.get(j * n + i) ?? 0;
-    pairs.set(pk, a + b - a * b);
-  }
-  let max = 0;
-  for (const v of pairs.values()) if (v > max) max = v;
-  const floor = max / N_EPOCHS;
-
-  const keys = [...pairs.keys()].sort((p, q) => p - q);
-  const head: number[] = [];
-  const tail: number[] = [];
-  const weight: number[] = [];
-  for (const pk of keys) {
-    const v = pairs.get(pk)!;
-    if (v < floor) continue;
-    const i = Math.floor(pk / n);
-    const j = pk - i * n;
-    head.push(i, j);
-    tail.push(j, i);
-    weight.push(v, v);
-  }
-  return { head: Int32Array.from(head), tail: Int32Array.from(tail), weight: Float64Array.from(weight) };
+  const keys = [...pairs.keys()].sort((a, b) => a - b);
+  const pi = new Int32Array(keys.length);
+  const pj = new Int32Array(keys.length);
+  const pv = new Float64Array(keys.length);
+  let total = 0;
+  keys.forEach((key, e) => {
+    pi[e] = Math.floor(key / n);
+    pj[e] = key - pi[e] * n;
+    pv[e] = pairs.get(key)!;
+    total += 2 * pv[e];
+  });
+  for (let e = 0; e < pv.length; e++) pv[e] /= total;
+  return { i: pi, j: pj, p: pv };
 }
 
 // ---------------------------------------------------------------------------
@@ -387,10 +330,9 @@ function symmetricEigen(m: number[][]): { values: number[]; vectors: number[][] 
   return { values, vectors };
 }
 
-// umap-learn's init="pca": principal components, scaled so the furthest
-// coordinate is 10, a whisper of noise to separate exact twins, then each
-// axis stretched to 0-10.
-function pcaStart(x: Float64Array[], random: () => number): Float64Array {
+// scikit-learn's init="pca": the two principal components, scaled so the
+// first has a standard deviation of 1e-4.
+function pcaStart(x: Float64Array[]): Float64Array {
   const n = x.length;
   const dims = x[0].length;
   const mean = new Float64Array(dims);
@@ -419,136 +361,82 @@ function pcaStart(x: Float64Array[], random: () => number): Float64Array {
   });
 
   const y = new Float64Array(n * 2);
-  let maxAbs = 0;
   for (let i = 0; i < n; i++) {
     for (let c = 0; c < 2; c++) {
       let s = 0;
       for (let d = 0; d < dims; d++) s += (x[i][d] - mean[d]) * axes[c][d];
       y[i * 2 + c] = s;
-      if (Math.abs(s) > maxAbs) maxAbs = Math.abs(s);
     }
   }
-  const expand = maxAbs > 0 ? 10 / maxAbs : 1;
-  for (let p = 0; p < n * 2; p++) y[p] = y[p] * expand + gaussian(random) * 1e-4;
-  for (let c = 0; c < 2; c++) {
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (let i = 0; i < n; i++) {
-      lo = Math.min(lo, y[i * 2 + c]);
-      hi = Math.max(hi, y[i * 2 + c]);
-    }
-    const span = hi - lo || 1;
-    for (let i = 0; i < n; i++) y[i * 2 + c] = (10 * (y[i * 2 + c] - lo)) / span;
-  }
+  let m0 = 0;
+  for (let i = 0; i < n; i++) m0 += y[i * 2];
+  m0 /= n;
+  let sd = 0;
+  for (let i = 0; i < n; i++) sd += (y[i * 2] - m0) * (y[i * 2] - m0);
+  sd = Math.sqrt(sd / n) || 1;
+  for (let p = 0; p < n * 2; p++) y[p] = (y[p] / sd) * 1e-4;
   return y;
 }
 
 // ---------------------------------------------------------------------------
 // Optimisation
 
-// The curve 1 / (1 + a d^2b) that stands in for "how close two films sit
-// on the map", fitted to MIN_DIST and SPREAD as umap-learn's find_ab_params
-// does (least squares over 300 points out to 3 x SPREAD), here by a grid
-// that narrows in on the best fit.
-function fitCurve(spread: number, minDist: number): { a: number; b: number } {
-  const xs: number[] = [];
-  const ys: number[] = [];
-  for (let i = 0; i < 300; i++) {
-    const d = (spread * 3 * i) / 299;
-    xs.push(d);
-    ys.push(d < minDist ? 1 : Math.exp(-(d - minDist) / spread));
-  }
-  const err = (a: number, b: number) => {
-    let s = 0;
-    for (let i = 0; i < xs.length; i++) {
-      const f = 1 / (1 + a * Math.pow(xs[i], 2 * b));
-      s += (f - ys[i]) * (f - ys[i]);
-    }
-    return s;
-  };
-  let best = { a: 1, b: 1, e: err(1, 1) };
-  let la0 = Math.log(1e-3);
-  let la1 = Math.log(1e3);
-  let b0 = 0.05;
-  let b1 = 4;
-  const steps = 80;
-  for (let round = 0; round < 8; round++) {
-    for (let ia = 0; ia <= steps; ia++) {
-      const a = Math.exp(la0 + ((la1 - la0) * ia) / steps);
-      for (let ib = 0; ib <= steps; ib++) {
-        const b = b0 + ((b1 - b0) * ib) / steps;
-        const e = err(a, b);
-        if (e < best.e) best = { a, b, e };
+// scikit-learn's exact t-SNE gradient and _gradient_descent: every pair of
+// films pushes apart (Student-t), neighbours pull together in proportion
+// to their affinity, with momentum and per-coordinate gains. Learning
+// rate as scikit-learn's "auto": n / early exaggeration / 4, at least 50.
+function optimise(y: Float64Array, P: Affinities, n: number): void {
+  const learningRate = Math.max(n / EARLY_EXAGGERATION / 4, 50);
+  const update = new Float64Array(n * 2);
+  const gains = new Float64Array(n * 2).fill(1);
+  const grad = new Float64Array(n * 2);
+  const m = P.p.length;
+
+  for (let iter = 0; iter < N_ITER; iter++) {
+    const exaggeration = iter < EARLY_ITER ? EARLY_EXAGGERATION : 1;
+    const momentum = iter < EARLY_ITER ? MOMENTUM_EARLY : MOMENTUM;
+    grad.fill(0);
+
+    let z = 0;
+    for (let i = 0; i < n; i++) {
+      const yi0 = y[i * 2];
+      const yi1 = y[i * 2 + 1];
+      let gx = 0;
+      let gy = 0;
+      for (let j = i + 1; j < n; j++) {
+        const dx = yi0 - y[j * 2];
+        const dy = yi1 - y[j * 2 + 1];
+        const w = 1 / (1 + dx * dx + dy * dy);
+        z += 2 * w;
+        const f = w * w;
+        gx += f * dx;
+        gy += f * dy;
+        grad[j * 2] -= f * dx;
+        grad[j * 2 + 1] -= f * dy;
       }
+      grad[i * 2] += gx;
+      grad[i * 2 + 1] += gy;
     }
-    const dla = ((la1 - la0) / steps) * 2;
-    const db = ((b1 - b0) / steps) * 2;
-    la0 = Math.log(best.a) - dla;
-    la1 = Math.log(best.a) + dla;
-    b0 = Math.max(1e-3, best.b - db);
-    b1 = best.b + db;
-  }
-  return { a: best.a, b: best.b };
-}
+    const repel = -4 / z;
+    for (let p = 0; p < n * 2; p++) grad[p] *= repel;
 
-function clip(v: number): number {
-  return v > 4 ? 4 : v < -4 ? -4 : v;
-}
-
-// umap-learn's optimize_layout_euclidean, two dimensions, moving both ends
-// of every sampled edge.
-function optimise(y: Float64Array, edges: Edges, n: number, a: number, b: number, random: () => number): void {
-  const m = edges.weight.length;
-  let max = 0;
-  for (let e = 0; e < m; e++) if (edges.weight[e] > max) max = edges.weight[e];
-  const epochsPerSample = new Float64Array(m);
-  for (let e = 0; e < m; e++) epochsPerSample[e] = max / edges.weight[e];
-  const epochsPerNegative = new Float64Array(m);
-  for (let e = 0; e < m; e++) epochsPerNegative[e] = epochsPerSample[e] / NEGATIVE_SAMPLE_RATE;
-  const nextSample = Float64Array.from(epochsPerSample);
-  const nextNegative = Float64Array.from(epochsPerNegative);
-
-  for (let epoch = 0; epoch < N_EPOCHS; epoch++) {
-    const alpha = LEARNING_RATE * (1 - epoch / N_EPOCHS);
     for (let e = 0; e < m; e++) {
-      if (nextSample[e] > epoch) continue;
-      const i = edges.head[e];
-      const j = edges.tail[e];
-      const ix = i * 2;
-      const jx = j * 2;
+      const i = P.i[e];
+      const j = P.j[e];
+      const dx = y[i * 2] - y[j * 2];
+      const dy = y[i * 2 + 1] - y[j * 2 + 1];
+      const f = (4 * exaggeration * P.p[e]) / (1 + dx * dx + dy * dy);
+      grad[i * 2] += f * dx;
+      grad[i * 2 + 1] += f * dy;
+      grad[j * 2] -= f * dx;
+      grad[j * 2 + 1] -= f * dy;
+    }
 
-      let dx = y[ix] - y[jx];
-      let dy = y[ix + 1] - y[jx + 1];
-      let d2 = dx * dx + dy * dy;
-      if (d2 > 0) {
-        const coeff = (-2 * a * b * Math.pow(d2, b - 1)) / (a * Math.pow(d2, b) + 1);
-        const gx = clip(coeff * dx);
-        const gy = clip(coeff * dy);
-        y[ix] += gx * alpha;
-        y[ix + 1] += gy * alpha;
-        y[jx] -= gx * alpha;
-        y[jx + 1] -= gy * alpha;
-      }
-      nextSample[e] += epochsPerSample[e];
-
-      const negatives = Math.floor((epoch - nextNegative[e]) / epochsPerNegative[e]);
-      for (let s = 0; s < negatives; s++) {
-        const o = Math.floor(random() * n);
-        if (o === i) continue;
-        const ox = o * 2;
-        dx = y[ix] - y[ox];
-        dy = y[ix + 1] - y[ox + 1];
-        d2 = dx * dx + dy * dy;
-        if (d2 > 0) {
-          const coeff = (2 * REPULSION * b) / ((0.001 + d2) * (a * Math.pow(d2, b) + 1));
-          y[ix] += clip(coeff * dx) * alpha;
-          y[ix + 1] += clip(coeff * dy) * alpha;
-        } else {
-          y[ix] += 4 * alpha;
-          y[ix + 1] += 4 * alpha;
-        }
-      }
-      nextNegative[e] += negatives * epochsPerNegative[e];
+    for (let p = 0; p < n * 2; p++) {
+      gains[p] = update[p] * grad[p] < 0 ? gains[p] + 0.2 : gains[p] * 0.8;
+      if (gains[p] < MIN_GAIN) gains[p] = MIN_GAIN;
+      update[p] = momentum * update[p] - learningRate * gains[p] * grad[p];
+      y[p] += update[p];
     }
   }
 }
@@ -799,22 +687,17 @@ async function main() {
 
   const [films, moods] = await Promise.all([fetchFilms(), fetchMoods()]);
   const n = films.length;
-  if (n < N_NEIGHBORS * 4) throw new Error(`Only ${n} films to lay out -- too few for a map.`);
+  const k = Math.floor(3 * PERPLEXITY);
+  if (n <= k) throw new Error(`Only ${n} films to lay out -- too few for a map.`);
   console.log(`${n} films, ${films[0].v.length} dimensions, ${moods.length} moods.`);
 
   const x = films.map((f) => Float64Array.from(f.v));
-  const random = makeRandom(SEED);
+  const nn = nearestNeighbours(x, k);
+  const P = affinities(nn, n);
+  console.log(`Neighbourhoods: ${P.p.length} pairs.`);
 
-  const nn = nearestNeighbours(x, N_NEIGHBORS - 1);
-  const w = memberships(nn, n);
-  const edges = fuzzyUnion(nn, w, n);
-  console.log(`Neighbourhood graph: ${edges.weight.length / 2} pairs.`);
-
-  const { a, b } = fitCurve(SPREAD, MIN_DIST);
-  console.log(`Curve: a=${a.toFixed(4)} b=${b.toFixed(4)}.`);
-
-  const start = pcaStart(x, random);
-  optimise(start, edges, n, a, b, random);
+  const start = pcaStart(x);
+  optimise(start, P, n);
   for (let p = 0; p < n * 2; p++) {
     if (!Number.isFinite(start[p])) throw new Error('The layout came out with a missing position.');
   }
