@@ -1,0 +1,43 @@
+name: Layout Mood Map
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (lay out and report, write nothing)'
+        type: boolean
+        default: false
+  # Runs once whenever the job changes, so a new version of the map goes up
+  # without anyone having to start it.
+  push:
+    branches: [main]
+    paths:
+      - 'layout-mood-map.ts'
+      - '.github/workflows/layout-mood-map.yml'
+  schedule:
+    # Weekly, Monday 06:23 UTC -- after the nightly refreshes, so films read
+    # for mood during the week join the map. Off the hour because GitHub
+    # delays jobs queued at :00.
+    - cron: '23 6 * * 1'
+
+# A manual run and the schedule never lay out at the same time; each run
+# replaces the whole map, so two at once would only waste the second.
+concurrency:
+  group: layout-mood-map
+  cancel-in-progress: false
+
+jobs:
+  layout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run layout-mood-map
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}

@@ -32,7 +32,8 @@
     "refresh-tv-popularity": "tsx refresh-tv-popularity.ts",
     "refresh-availability": "tsx refresh-availability.ts",
     "pipeline-health": "tsx pipeline-health.ts",
-    "send-release-alerts": "tsx send-release-alerts.ts"
+    "send-release-alerts": "tsx send-release-alerts.ts",
+    "layout-mood-map": "tsx layout-mood-map.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
