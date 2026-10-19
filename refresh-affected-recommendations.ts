@@ -1,33 +1,31 @@
 // Companion to refresh-new-recommendations.ts. That script gives newly
 // -scored movies their OWN 5 rails. This script handles the other half
-// of keeping the catalog current without a full recompute: existing,
-// already-processed movies that a new movie might now belong in.
+// of keeping the catalogue current without a full recompute: existing
+// movies that a newly recommendable movie should now appear next to.
 //
-// Nearest-neighbor lists are stored, not computed live -- a new movie
-// added this week has no way to "appear" in an existing movie's top 10
-// until that existing movie's rails are recomputed. Without this
-// script, only brand-new movies would ever get fresh recommendations;
-// everything already in the catalog would slowly go stale relative to
-// new arrivals, forever.
+// Nearest-neighbour lists are stored, not computed live -- a movie has no
+// way to "appear" in an existing movie's top 10 until that existing
+// movie's rails are recomputed. Without this script, everything already
+// in the catalogue would slowly go stale relative to what arrives.
 //
-// "Which existing movies might be affected" is answered by
-// find_existing_movies_affected_by_new(), an index-accelerated query
-// (not a full scan): for each new movie (defined the same way
-// refresh-new-recommendations.ts defines it -- no movie_neighbors rows
-// yet), find its nearest neighbors among ALREADY-processed movies via
-// the same dual-branch fingerprint + keyword lookup mood_pool itself
-// uses, genre-gated. Run this AFTER refresh-new-recommendations.ts in
-// the same weekly job -- doesn't strictly depend on it (this script
-// only reads existing movies' embeddings, not their neighbor rows),
-// but running new-movie rails first means a newly-added movie is fully
-// ready before anything else's list might start pointing at it.
+// WHAT COUNTS AS AN ARRIVAL. A movie arrives once: when it is scored, has
+// all five rails and has 250+ votes, the floor every rail uses for its
+// picks (rail_new_arrivals; rail_arrivals_seen remembers which have been
+// handled). That covers both a newly ingested film and -- far more often
+// -- one already here whose votes have just passed the floor.
 //
-// Expected weekly scale: a few hundred to low thousands of movies
-// (new arrivals plus their embedding-neighbors, deduplicated) -- a
-// small fraction of the ~48k catalog, not a full recompute. Reuses the
-// same adaptive-chunking pattern as refresh-new-recommendations.ts and
-// refresh-recommendations.ts: halve and retry on timeout, skip and log
-// at the floor rather than aborting the whole run over one bad chunk.
+// This used to look for movies with no rails at all, which is how
+// refresh-new-recommendations.ts defined "new". But that step runs first
+// and gives every new movie its rails, so by the time this ran there were
+// never any, and it rebuilt nothing on any day it ran after a successful
+// first step.
+//
+// For each arrival, movies_affected_by() finds the existing movies it is
+// nearest to by feel and by keywords, genre-gated. Those movies get all
+// five rails recomputed, in order, with the same settings as the full
+// refresh (net 300 -- this used 100, which would have rebuilt lists from a
+// narrower pool than the one they were built from). Only once that has
+// run are the arrivals marked as handled, so a failed run retries them.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
@@ -37,21 +35,23 @@ const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const TOP_K = 10;
-const NET_SIZE = 100;
-// Same starting point as refresh-new-recommendations.ts settled on
-// after real timeout data -- no reason to assume this workload is
-// cheaper per-movie, so starting at the same proven floor rather than
-// re-discovering it here.
+const NET_SIZE = 300;
+// Same starting point as refresh-new-recommendations.ts settled on after
+// real timeout data.
 const INITIAL_CHUNK_SIZE = 20;
 const MIN_CHUNK_SIZE = 10;
-// How many nearest existing movies to check per new movie, per branch
-// (fingerprint and keyword). Deliberately smaller than a rail's own
-// net_size -- this is a "could this new movie plausibly matter to you"
-// screen, not a final ranking, so it can afford to be narrower.
+// How many nearest existing movies to check per arrival, per branch
+// (feel and keywords). A "could this arrival plausibly matter to you"
+// screen, not a final ranking, so it can be narrower than a rail's pool.
 const NEIGHBOR_CHECK_SIZE = 50;
+// Arrivals handled per run. Each brings up to ~100 existing movies to
+// rebuild; ten keeps a run well inside the workflow's time limit, and
+// any left over are handled on the following days, best-known first.
+const ARRIVALS_PER_RUN = 10;
 
-// Retry budget for the discovery query. See fetchAffectedMovieIds.
-const DISCOVERY_MAX_ATTEMPTS = 4;
+// Retry budget for the per-arrival screen, which is one query that cannot
+// be split. Measured at ~10s per arrival warm.
+const DISCOVERY_MAX_ATTEMPTS = 3;
 const DISCOVERY_BACKOFF_MS = 15000;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -80,48 +80,32 @@ const RAILS: RailConfig[] = [
   { name: 'hidden_gem', rpcName: 'compute_hidden_gem', extraArgs: { vote_floor: 250, vote_ceiling: 5000 } },
 ];
 
-// Retries on timeout instead of aborting the run. This was the ONLY
-// database call in this file without timeout handling -- processChunk
-// below has always halved-and-retried -- and a single timeout here
-// killed the whole job.
-//
-// It is not chunkable (there is nothing to split: it's one discovery
-// query), so the strategy is backoff rather than subdivision, and that
-// specifically fits the measured failure. The query costs the same
-// whether there is work to do or not: it always anti-joins all ~48.7k
-// vector-bearing movies against the 2.4M-row movie_neighbors table,
-// which is ~209,000 buffers, about 1.6GB of pages. Measured warm it
-// runs in 444ms. It failed in production because this step runs
-// immediately after refresh-new-recommendations spends ~30 minutes
-// hammering the same database -- cold cache and contention pushed
-// 444ms past the 8s statement timeout, on a run where it turned out
-// there were zero new movies and therefore nothing to do at all.
-//
-// Since the first attempt warms exactly the pages the retry needs, a
-// short backoff is very likely to succeed where an immediate retry of
-// the identical query normally would not.
-async function fetchAffectedMovieIds(): Promise<string[]> {
-  for (let attempt = 1; attempt <= DISCOVERY_MAX_ATTEMPTS; attempt++) {
-    const { data, error } = await supabase.rpc('find_existing_movies_affected_by_new', {
-      p_neighbor_check_size: NEIGHBOR_CHECK_SIZE,
-    });
-
-    if (!error) return (data ?? []).map((row: any) => row.movie_id as string);
-
-    if (!isTimeoutError(error.message) || attempt === DISCOVERY_MAX_ATTEMPTS) throw error;
-
-    const waitMs = DISCOVERY_BACKOFF_MS * attempt;
-    console.log(
-      `  discovery query timed out (attempt ${attempt}/${DISCOVERY_MAX_ATTEMPTS}) -- retrying in ${waitMs / 1000}s`,
-    );
-    await sleep(waitMs);
-  }
-  // Unreachable: the loop either returns or throws on the final attempt.
-  throw new Error('find_existing_movies_affected_by_new: exhausted retries');
-}
-
 function isTimeoutError(message: string): boolean {
   return /statement timeout/i.test(message);
+}
+
+async function fetchArrivals(): Promise<string[]> {
+  const { data, error } = await supabase.rpc('rail_new_arrivals', { p_limit: ARRIVALS_PER_RUN });
+  if (error) throw error;
+  return (data ?? []).map((row: any) => row.movie_id as string);
+}
+
+// One arrival at a time: the screen is an exact nearest-neighbour search
+// with a genre gate, ~10s each, and several in one call would pass the
+// statement timeout.
+async function fetchAffected(arrivalId: string): Promise<string[]> {
+  for (let attempt = 1; attempt <= DISCOVERY_MAX_ATTEMPTS; attempt++) {
+    const { data, error } = await supabase.rpc('movies_affected_by', {
+      p_ids: [arrivalId],
+      p_neighbor_check_size: NEIGHBOR_CHECK_SIZE,
+    });
+    if (!error) return (data ?? []).map((row: any) => row.movie_id as string);
+    if (!isTimeoutError(error.message) || attempt === DISCOVERY_MAX_ATTEMPTS) throw error;
+    const waitMs = DISCOVERY_BACKOFF_MS * attempt;
+    console.log(`  screen timed out for ${arrivalId} (attempt ${attempt}/${DISCOVERY_MAX_ATTEMPTS}) -- retrying in ${waitMs / 1000}s`);
+    await sleep(waitMs);
+  }
+  throw new Error('movies_affected_by: exhausted retries');
 }
 
 async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
@@ -155,14 +139,23 @@ async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
 }
 
 async function main() {
-  console.log('Finding existing movies that new additions might affect...');
-  const movieIds = await fetchAffectedMovieIds();
-  console.log(`${movieIds.length} existing movies to recheck.`);
+  console.log('Finding newly recommendable movies...');
+  const arrivals = await fetchArrivals();
+  console.log(`${arrivals.length} arrival(s) to place (up to ${ARRIVALS_PER_RUN} per run).`);
 
-  if (movieIds.length === 0) {
+  if (arrivals.length === 0) {
     console.log('Nothing to do.');
     return;
   }
+
+  const affected = new Set<string>();
+  for (const id of arrivals) {
+    const near = await fetchAffected(id);
+    for (const n of near) affected.add(n);
+    console.log(`  ${id}: ${near.length} nearby movies (${affected.size} distinct so far)`);
+  }
+  const movieIds = [...affected];
+  console.log(`${movieIds.length} existing movies to recheck.`);
 
   for (const rail of RAILS) {
     console.log(`\n=== ${rail.name} (${movieIds.length} movies, starting chunks of ${INITIAL_CHUNK_SIZE}) ===`);
@@ -176,7 +169,9 @@ async function main() {
     console.log(`${rail.name} done: ${totalProcessed} processed.`);
   }
 
-  console.log('\nDone.');
+  const { error } = await supabase.rpc('mark_rail_arrivals_seen', { p_ids: arrivals });
+  if (error) throw error;
+  console.log(`\nMarked ${arrivals.length} arrival(s) as placed. Done.`);
 }
 
 main().catch((err) => {
