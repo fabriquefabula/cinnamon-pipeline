@@ -7,6 +7,7 @@
 // re-run of text that is already in place is fine.
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -14,8 +15,15 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
 }
 
+// A dropped connection or a gateway error is sent again where that is
+// safe (see resilient-fetch.ts), instead of ending the run. Every write
+// here is an update to fixed text, so one sent twice leaves the same row.
+// A section or note renamed by a first try that got no answer matches
+// nothing on the second, and the exists() check below takes that as text
+// already in place.
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   db: { schema: 'public' },
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
 });
 
 interface ShelfCopy {

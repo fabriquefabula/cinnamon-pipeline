@@ -49,6 +49,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import * as webPushModule from 'web-push';
+import { API_STATUSES, GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 // Published web-push 3.x is CommonJS, so from this ES module its functions
 // arrive as the default export. The library's main branch has since moved
@@ -87,7 +88,29 @@ const TTL_SECONDS = 2 * 24 * 60 * 60;
 // "gone" is dropped.
 const MAX_FAILURES = 10;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// A dropped connection or a gateway error is sent again where that is
+// safe (see resilient-fetch.ts), instead of ending the run. The claim in
+// release_alerts_sent is not: it is an upsert that ignores duplicates and
+// asks for its rows back, which resilientFetch never repeats, and a second
+// try after a first that landed unanswered would get none of its rows
+// back -- those alerts would be taken as sent by an earlier run and never
+// go out. The delete that un-records an alert is repeated, which is safe
+// because only this job writes release_alerts_sent and two runs of it
+// never overlap (the workflow's concurrency group).
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: {
+    fetch: resilientFetch({
+      label: 'database',
+      retryOn: GATEWAY_STATUSES,
+      // Read-only (STABLE) functions this job calls; nothing else it calls is sent twice.
+      repeatRpc: (name) => ['release_alert_titles', 'streaming_alert_titles'].includes(name),
+    }),
+  },
+});
+
+// TMDB calls are sent again on a dropped connection, a rate limit or a
+// 5xx (see resilient-fetch.ts).
+const tmdbFetch = resilientFetch({ label: 'TMDB', retryOn: API_STATUSES });
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -106,7 +129,7 @@ function addDays(iso: string, days: number): string {
 }
 
 async function tmdbGet(path: string): Promise<any> {
-  const res = await fetch(`https://api.themoviedb.org/3${path}`, {
+  const res = await tmdbFetch(`https://api.themoviedb.org/3${path}`, {
     headers: { Authorization: `Bearer ${TMDB_API_KEY}` },
   });
   if (!res.ok) return null;

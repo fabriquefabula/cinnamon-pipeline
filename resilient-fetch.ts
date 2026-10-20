@@ -21,9 +21,13 @@
 // repeated -- it could land twice. GET, HEAD, PUT, PATCH and DELETE are
 // repeatable by definition, and so is an upsert (Prefer:
 // resolution=merge-duplicates), which leaves the same rows however many
-// times it lands. A database function (/rest/v1/rpc/<name>) is repeated
-// only when the job names it in repeatRpc, because only the job knows
-// whether a function reads, recomputes or appends.
+// times it lands. An upsert that ignores duplicates leaves the same rows
+// too, but a second landing answers with none of the rows the first one
+// wrote, so it is repeated only when the job does not ask for those rows
+// back (return=representation): a job that reads them to claim work would
+// be told it had claimed nothing. A database function (/rest/v1/rpc/<name>)
+// is repeated only when the job names it in repeatRpc, because only the
+// job knows whether a function reads, recomputes or appends.
 //
 // The body of an answer is read in full before it is handed back, so a
 // connection cut off part-way through a body is caught and retried here
@@ -94,7 +98,9 @@ function repeatable(input: FetchInput, init: RequestInit | undefined, options: R
   if (method !== 'POST') return true;
   const rpc = /\/rest\/v1\/rpc\/([^/?]+)/.exec(urlOf(input).pathname);
   if (rpc) return options.repeatRpc?.(decodeURIComponent(rpc[1])) ?? false;
-  return /resolution=merge-duplicates/i.test(preferOf(input, init));
+  const prefer = preferOf(input, init);
+  if (/resolution=merge-duplicates/i.test(prefer)) return true;
+  return /resolution=ignore-duplicates/i.test(prefer) && !/return=representation/i.test(prefer);
 }
 
 // Retry-After, as seconds or as a date; null when absent or unreadable.

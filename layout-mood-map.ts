@@ -44,6 +44,7 @@
 //           MAP_MEDIUM=tv (the series map; the film map otherwise)
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
@@ -110,7 +111,34 @@ const LABEL_MIN_FILMS = 12;
 const PAGE_SIZE = 1000;
 const WRITE_CHUNK = 500;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// The finish call, dropped by the gateway, is sent again after a pause far
+// longer than it takes (well under a second), and at most twice.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
+
+// A dropped connection or a gateway error is sent again where that is
+// safe (see resilient-fetch.ts), instead of ending the run: the reads,
+// the two upserts, and the map's two read-only (STABLE) input functions.
+// The finish is left to main(), below.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: {
+    fetch: resilientFetch({
+      label: 'database',
+      retryOn: GATEWAY_STATUSES,
+      repeatRpc: (name) => name === MAP.input || name === MAP.about,
+    }),
+  },
+});
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
+}
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -777,7 +805,20 @@ async function main() {
   );
   if (labelError) throw labelError;
 
-  const { data, error } = await supabase.rpc(MAP.finish, { p_run: runIso });
+  // The finish copies this run's rows onto the map with upserts and
+  // nothing else, so a second call leaves the map as the first did, even
+  // one that meets the first still running; one the gateway drops is sent
+  // again after GATEWAY_PAUSE_MS.
+  let finished = await supabase.rpc(MAP.finish, { p_run: runIso });
+  for (let retry = 1; finished.error && isGatewayFailure(finished.status) && retry <= GATEWAY_RETRIES; retry++) {
+    console.log(
+      `  no answer from the database for ${MAP.finish} (status ${finished.status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    finished = await supabase.rpc(MAP.finish, { p_run: runIso });
+  }
+  const { data, error } = finished;
   if (error) throw error;
   console.log(`Map updated: ${data} ${MAP.noun}, ${labels.length} mood names.`);
   console.log(`Done in ${((Date.now() - started) / 1000).toFixed(1)}s.`);

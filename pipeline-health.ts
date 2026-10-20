@@ -22,11 +22,29 @@
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// A dropped connection or a gateway error is sent again where that is
+// safe (see resilient-fetch.ts), instead of failing the run and emailing
+// the owner about a pipeline that is fine. The pipeline_runs row is a
+// plain insert and is never sent twice, so a run records one verdict.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: {
+    fetch: resilientFetch({
+      label: 'database',
+      retryOn: GATEWAY_STATUSES,
+      // Three tries rather than five: this job is the alarm, and with the
+      // database hanging, five tries of up to 100s each would run into the
+      // job's 10-minute limit before it could fail and email.
+      attempts: 3,
+      // Read-only (STABLE) functions this job calls; nothing else it calls is sent twice.
+      repeatRpc: (name) => name === 'pipeline_health',
+    }),
+  },
+});
 
 function requireEnv(name: string): string {
   const v = process.env[name];
