@@ -30,6 +30,7 @@
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
@@ -54,7 +55,27 @@ const ARRIVALS_PER_RUN = 10;
 const DISCOVERY_MAX_ATTEMPTS = 3;
 const DISCOVERY_BACKOFF_MS = 15000;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// A rail call the gateway drops may still be running in the database, and
+// a second call for the same movies while the first is still writing would
+// trip over its rows (the compute_* functions clear a movie's rail and
+// write it again, with no ON CONFLICT). So a dropped rail call is sent
+// again only after the 60s statement timeout has run out on the first,
+// and at most twice. Marking the arrivals is sent again the same way.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
+
+// The two discovery calls only read, so resilientFetch may send them again
+// straight away; the rail calls are left to processChunk, below, and
+// marking the arrivals to main().
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: {
+    fetch: resilientFetch({
+      label: 'database',
+      retryOn: GATEWAY_STATUSES,
+      repeatRpc: (name) => ['rail_new_arrivals', 'movies_affected_by'].includes(name),
+    }),
+  },
+});
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -84,6 +105,12 @@ function isTimeoutError(message: string): boolean {
   return /statement timeout/i.test(message);
 }
 
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
+}
+
 async function fetchArrivals(): Promise<string[]> {
   const { data, error } = await supabase.rpc('rail_new_arrivals', { p_limit: ARRIVALS_PER_RUN });
   if (error) throw error;
@@ -108,8 +135,8 @@ async function fetchAffected(arrivalId: string): Promise<string[]> {
   throw new Error('movies_affected_by: exhausted retries');
 }
 
-async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
-  const { data, error } = await supabase.rpc(rail.rpcName, {
+async function processChunk(rail: RailConfig, ids: string[], gatewayRetries = 0): Promise<number> {
+  const { data, error, status } = await supabase.rpc(rail.rpcName, {
     top_k: TOP_K,
     net_size: NET_SIZE,
     movie_limit: null,
@@ -121,6 +148,15 @@ async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
   });
 
   if (!error) return data as number;
+
+  if (isGatewayFailure(status) && gatewayRetries < GATEWAY_RETRIES) {
+    console.log(
+      `  no answer from the database for a chunk of ${ids.length} (status ${status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    return processChunk(rail, ids, gatewayRetries + 1);
+  }
 
   if (isTimeoutError(error.message) && ids.length > MIN_CHUNK_SIZE) {
     const mid = Math.ceil(ids.length / 2);
@@ -169,7 +205,19 @@ async function main() {
     console.log(`${rail.name} done: ${totalProcessed} processed.`);
   }
 
-  const { error } = await supabase.rpc('mark_rail_arrivals_seen', { p_ids: arrivals });
+  // mark_rail_arrivals_seen upserts: a second call for the same arrivals
+  // finds their rows already there and only moves seen_at forward, and
+  // rail_new_arrivals only asks whether a row exists. So a call the
+  // gateway drops is sent again, after the same pause as a rail call.
+  let { error, status } = await supabase.rpc('mark_rail_arrivals_seen', { p_ids: arrivals });
+  for (let retry = 1; error && isGatewayFailure(status) && retry <= GATEWAY_RETRIES; retry++) {
+    console.log(
+      `  no answer from the database marking ${arrivals.length} arrival(s) (status ${status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    ({ error, status } = await supabase.rpc('mark_rail_arrivals_seen', { p_ids: arrivals }));
+  }
   if (error) throw error;
   console.log(`\nMarked ${arrivals.length} arrival(s) as placed. Done.`);
 }

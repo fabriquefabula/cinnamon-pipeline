@@ -33,6 +33,7 @@
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
@@ -43,12 +44,29 @@ const INITIAL_CHUNK_SIZE = 20; // reduced from 250 -- close to where chunks were
 const MIN_CHUNK_SIZE = 5; // below this, a timeout means the movie(s) themselves are the problem, not the batch size
 const INCOMPLETE_THRESHOLD = 10; // fewer than this in a fixed rail = affected
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// A rail call the gateway drops may still be running in the database, and
+// a second call for the same movies while the first is still writing would
+// trip over its rows (the compute_* functions clear a movie's rail and
+// write it again, with no ON CONFLICT). So a dropped rail call is sent
+// again only after the 60s statement timeout has run out on the first,
+// and at most twice.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
+
+// Reads are sent again on a dropped connection or a gateway error (see
+// resilient-fetch.ts); the rail calls are left to runChunk, below.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 interface RailConfig {
@@ -124,6 +142,12 @@ function isTimeoutError(message: string): boolean {
   return message.includes('statement timeout') || message.includes('57014');
 }
 
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
+}
+
 // Tries a chunk; on timeout, splits it in half and retries each half
 // (recursively, so a persistently slow chunk keeps shrinking until it
 // either succeeds or hits MIN_CHUNK_SIZE). Movies that still fail at
@@ -134,8 +158,9 @@ async function runChunk(
   rail: RailConfig,
   movieIds: string[],
   failedMovieIds: string[],
+  gatewayRetries = 0,
 ): Promise<number> {
-  const { data, error } = await supabase.rpc(rail.rpcName, {
+  const { data, error, status } = await supabase.rpc(rail.rpcName, {
     top_k: TOP_K,
     net_size: NET_SIZE,
     movie_limit: null,
@@ -147,6 +172,15 @@ async function runChunk(
   });
 
   if (!error) return data as number;
+
+  if (isGatewayFailure(status) && gatewayRetries < GATEWAY_RETRIES) {
+    console.log(
+      `  no answer from the database for a chunk of ${movieIds.length} (status ${status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    return runChunk(rail, movieIds, failedMovieIds, gatewayRetries + 1);
+  }
 
   if (isTimeoutError(error.message) && movieIds.length > MIN_CHUNK_SIZE) {
     const mid = Math.ceil(movieIds.length / 2);

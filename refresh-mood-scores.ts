@@ -41,16 +41,65 @@
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// refresh_movie_axis_scores_for and refresh_tv_axis_scores_for clear one
+// axis and write it again, so a second call for the same axis leaves the
+// same rows, and analyze_axis_scores changes no rows at all. A call the
+// gateway drops may still be running in the database, so it is sent again
+// only after a pause far longer than any of them takes (seconds, against
+// their own 180s limit), and at most twice. One that met the first still
+// running would wait for it, or fail on a lock or on the table's key,
+// which ends the run as it always did.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
+
+// The mood_axes read is sent again on a dropped connection or a gateway
+// error (see resilient-fetch.ts); the axis rebuilds and the ANALYZE are
+// left to rpcWithGatewayRetry, below. The premise index is not sent again:
+// it rebuilds from scratch under a limit of half an hour, and its failure
+// is already non-fatal. The pipeline_runs row is a plain insert.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
+}
+
+// Calls a database function that leaves the same rows however many times
+// it runs, and sends it again after GATEWAY_PAUSE_MS when the gateway
+// drops it. Any other failure comes back to the caller as before.
+async function rpcWithGatewayRetry(
+  name: string,
+  args?: Record<string, unknown>,
+  gatewayRetries = 0,
+): Promise<{ data: any; error: any }> {
+  const { data, error, status } = await supabase.rpc(name, args);
+  if (error && isGatewayFailure(status) && gatewayRetries < GATEWAY_RETRIES) {
+    console.log(
+      `  no answer from the database for ${name} (status ${status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    return rpcWithGatewayRetry(name, args, gatewayRetries + 1);
+  }
+  return { data, error };
 }
 
 async function main() {
@@ -79,13 +128,13 @@ async function main() {
   for (const axis of axes) {
     const t0 = Date.now();
 
-    const { data: movieRows, error: movieErr } = await supabase.rpc(
+    const { data: movieRows, error: movieErr } = await rpcWithGatewayRetry(
       'refresh_movie_axis_scores_for',
       { p_axis: axis },
     );
     if (movieErr) throw new Error(`refresh_movie_axis_scores_for('${axis}') failed: ${movieErr.message}`);
 
-    const { data: tvRows, error: tvErr } = await supabase.rpc('refresh_tv_axis_scores_for', {
+    const { data: tvRows, error: tvErr } = await rpcWithGatewayRetry('refresh_tv_axis_scores_for', {
       p_axis: axis,
     });
     if (tvErr) throw new Error(`refresh_tv_axis_scores_for('${axis}') failed: ${tvErr.message}`);
@@ -101,7 +150,7 @@ async function main() {
   }
 
   // One ANALYZE after the loop rather than 29 inside it.
-  const { error: analyzeErr } = await supabase.rpc('analyze_axis_scores');
+  const { error: analyzeErr } = await rpcWithGatewayRetry('analyze_axis_scores');
   if (analyzeErr) console.error(`analyze_axis_scores failed (non-fatal): ${analyzeErr.message}`);
 
   console.log(`Total: ${movieTotal} film rows, ${tvTotal} show rows.`);

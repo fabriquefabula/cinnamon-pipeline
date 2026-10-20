@@ -58,11 +58,18 @@
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// resilientFetch sends none of this job's requests twice (see
+// resilient-fetch.ts): all four functions write, and the pipeline_runs
+// row is a plain insert. rpc() below sends a function again itself when
+// no answer came back.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -120,18 +127,28 @@ function isTransportFailure(err: unknown): boolean {
 
 const ATTEMPTS = 3;
 
+// A gateway status (502, 503, 504 or one of Cloudflare's 52x) is not an
+// answer either, but the call may have reached the database and still be
+// running behind it. So it is sent again only after GATEWAY_PAUSE_MS,
+// against the seconds each of these functions takes. All four rebuild
+// what they write from scratch, so a second run leaves the same rows. One
+// that met the first still running would wait for it, or fail on a lock
+// or on the table's key, which ends the run as it always did.
+const GATEWAY_PAUSE_MS = 65000;
+
 async function rpc<T>(name: string): Promise<T> {
   for (let attempt = 1; ; attempt++) {
-    const { data, error } = await supabase.rpc(name);
+    const { data, error, status } = await supabase.rpc(name);
     if (!error) return data as T;
 
-    if (!isTransportFailure(error) || attempt === ATTEMPTS) {
+    const gateway = GATEWAY_STATUSES.has(status);
+    if (!(gateway || isTransportFailure(error)) || attempt === ATTEMPTS) {
       throw new Error(`${name} failed: ${describe(error)}`);
     }
 
-    const waitMs = 5000 * attempt;
+    const waitMs = gateway ? GATEWAY_PAUSE_MS : 5000 * attempt;
     console.warn(
-      `  ${name} did not reach the database: ${describe(error)}\n` +
+      `  ${name} ${gateway ? `got no answer from the database (status ${status})` : `did not reach the database: ${describe(error)}`}\n` +
         `  Retrying in ${waitMs / 1000}s (attempt ${attempt + 1} of ${ATTEMPTS}).`,
     );
     await sleep(waitMs);

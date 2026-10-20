@@ -53,6 +53,7 @@
 //   the same title appearing in two rails at once.
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
@@ -74,14 +75,33 @@ const PROGRESS_ROW_ID = 1;
 const TV_VISIBILITY_FLOOR = 180;
 const TV_VOTE_CEILING = 2000;
 
+// A rail call the gateway drops may still be running in the database, and
+// a second call for the same shows while the first is still writing would
+// trip over its rows (the compute_tv_* functions clear a show's rail and
+// write it again, with no ON CONFLICT). So a dropped rail call is sent
+// again only after the 60s statement timeout has run out on the first,
+// and at most twice. The checkpoint is saved only once processChunk has
+// returned, so a chunk being sent again is never skipped by a resume.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
+
+// Reads and checkpoint updates are sent again on a dropped connection or
+// a gateway error (see resilient-fetch.ts) -- a checkpoint update sets
+// every field outright, so landing twice writes the same row. The rail
+// calls are left to processChunk, below.
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   db: { schema: 'public' },
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
 });
 
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 interface RailConfig {
@@ -200,8 +220,14 @@ function isTimeoutError(message: string): boolean {
   return /statement timeout/i.test(message);
 }
 
-async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
-  const { data, error } = await supabase.rpc(rail.rpcName, {
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
+}
+
+async function processChunk(rail: RailConfig, ids: string[], gatewayRetries = 0): Promise<number> {
+  const { data, error, status } = await supabase.rpc(rail.rpcName, {
     top_k: TOP_K,
     net_size: NET_SIZE,
     show_limit: null,
@@ -213,6 +239,15 @@ async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
   });
 
   if (!error) return data as number;
+
+  if (isGatewayFailure(status) && gatewayRetries < GATEWAY_RETRIES) {
+    console.log(
+      `  no answer from the database for a chunk of ${ids.length} (status ${status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    return processChunk(rail, ids, gatewayRetries + 1);
+  }
 
   if (isTimeoutError(error.message) && ids.length > MIN_CHUNK_SIZE) {
     const mid = Math.ceil(ids.length / 2);

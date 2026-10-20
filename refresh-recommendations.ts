@@ -92,6 +92,7 @@
 // Optional env var: EVENT_NAME (github.event_name from the workflow)
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
@@ -131,8 +132,14 @@ const MIN_CHUNK_SIZE = 10;
 const TIME_BUDGET_MS = 320 * 60 * 1000;
 const PROGRESS_ROW_ID = 1;
 
+// Reads and checkpoint updates are sent again on a dropped connection or
+// a gateway error (see resilient-fetch.ts) -- a checkpoint update sets
+// every field outright, so landing twice writes the same row. The rail
+// calls are not: processChunk sends those again itself (TRANSIENT_RETRIES,
+// below).
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   db: { schema: 'public' },
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
 });
 
 function requireEnv(name: string): string {
@@ -264,6 +271,11 @@ function isTimeoutError(message: string): boolean {
 // rail is wrong. The 8 October run died on exactly one of these, 20,790
 // films into hidden_gem and three hours into the job. They are retried
 // with a growing wait (30s, 1m, 2m, 4m, 8m) before the walk gives up.
+//
+// They are recognised by the answer's status as well as by its text: a
+// gateway can also answer in plain text or JSON, and a connection cut
+// off part-way through the answer comes back with status 0 and words the
+// pattern below does not know.
 const TRANSIENT_RETRIES = 5;
 const TRANSIENT_FIRST_WAIT_MS = 30 * 1000;
 
@@ -271,6 +283,12 @@ function isTransientError(message: string): boolean {
   return /<!DOCTYPE html|<html|\b(?:502|503|504|520|521|522|523|524|525|526|530)\b|fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(
     message,
   );
+}
+
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -292,7 +310,11 @@ function callRail(rail: RailConfig, ids: string[]) {
 
 async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
   let result = await callRail(rail, ids);
-  for (let attempt = 1; result.error && isTransientError(result.error.message) && attempt <= TRANSIENT_RETRIES; attempt++) {
+  for (
+    let attempt = 1;
+    result.error && (isTransientError(result.error.message) || isGatewayFailure(result.status)) && attempt <= TRANSIENT_RETRIES;
+    attempt++
+  ) {
     const wait = TRANSIENT_FIRST_WAIT_MS * 2 ** (attempt - 1);
     console.log(
       `  database unreachable on chunk of ${ids.length} -- retry ${attempt}/${TRANSIENT_RETRIES} in ${wait / 1000}s`,

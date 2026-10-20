@@ -23,6 +23,7 @@
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
@@ -58,7 +59,26 @@ const MIN_CHUNK_SIZE = 10;
 const DISCOVERY_MAX_ATTEMPTS = 4;
 const DISCOVERY_BACKOFF_MS = 15000;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// A rail call the gateway drops may still be running in the database, and
+// a second call for the same movies while the first is still writing would
+// trip over its rows (the compute_* functions clear a movie's rail and
+// write it again, with no ON CONFLICT). So a dropped rail call is sent
+// again only after the 60s statement timeout has run out on the first,
+// and at most twice.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
+
+// The discovery call only reads, so resilientFetch may send it again
+// straight away; the rail calls are left to processChunk, below.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: {
+    fetch: resilientFetch({
+      label: 'database',
+      retryOn: GATEWAY_STATUSES,
+      repeatRpc: (name) => name === 'films_missing_rails',
+    }),
+  },
+});
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -93,6 +113,12 @@ interface MissingMovie {
 
 function isTimeoutError(message: string): boolean {
   return /statement timeout/i.test(message);
+}
+
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
 }
 
 // Every scored movie (essence_vector_ext_z present -- a movie without it
@@ -131,8 +157,8 @@ async function fetchMoviesMissingRails(): Promise<MissingMovie[]> {
 // halves the chunk and retries both halves instead of failing the whole
 // run. At MIN_CHUNK_SIZE, logs and skips rather than retrying forever --
 // a skipped movie keeps its gap and is picked up again by the next run.
-async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
-  const { data, error } = await supabase.rpc(rail.rpcName, {
+async function processChunk(rail: RailConfig, ids: string[], gatewayRetries = 0): Promise<number> {
+  const { data, error, status } = await supabase.rpc(rail.rpcName, {
     top_k: TOP_K,
     net_size: NET_SIZE,
     movie_limit: null,
@@ -144,6 +170,15 @@ async function processChunk(rail: RailConfig, ids: string[]): Promise<number> {
   });
 
   if (!error) return data as number;
+
+  if (isGatewayFailure(status) && gatewayRetries < GATEWAY_RETRIES) {
+    console.log(
+      `  no answer from the database for a chunk of ${ids.length} (status ${status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    return processChunk(rail, ids, gatewayRetries + 1);
+  }
 
   if (isTimeoutError(error.message) && ids.length > MIN_CHUNK_SIZE) {
     const mid = Math.ceil(ids.length / 2);
