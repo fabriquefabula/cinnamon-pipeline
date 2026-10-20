@@ -1,0 +1,47 @@
+name: Layout TV Mood Map
+
+# The series map at /tv/map: the same job as Layout Mood Map, run for
+# television (MAP_MEDIUM=tv). See layout-mood-map.ts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (lay out and report, write nothing)'
+        type: boolean
+        default: false
+  # Runs once whenever the job changes, so a new version of the map goes up
+  # without anyone having to start it.
+  push:
+    branches: [main]
+    paths:
+      - 'layout-mood-map.ts'
+      - '.github/workflows/layout-tv-mood-map.yml'
+  schedule:
+    # Weekly, Monday 06:53 UTC -- half an hour after the film map, after
+    # the nightly refreshes, so series read for mood during the week join
+    # the map. Off the hour because GitHub delays jobs queued at :00.
+    - cron: '53 6 * * 1'
+
+# A manual run and the schedule never lay out at the same time; each run
+# replaces the whole map, so two at once would only waste the second.
+concurrency:
+  group: layout-tv-mood-map
+  cancel-in-progress: false
+
+jobs:
+  layout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run layout-mood-map
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          MAP_MEDIUM: tv

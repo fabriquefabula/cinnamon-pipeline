@@ -2,6 +2,12 @@
 // films that feel alike sit together and one feeling shades into the next
 // across the map. The site draws it at /map.
 //
+// The same job lays out the series map at /tv/map when run with
+// MAP_MEDIUM=tv (layout-tv-mood-map.yml): every well-known series, from
+// the tv_mood_map_* functions and tables, named with the TV moods. The two
+// maps are laid out apart, each from its own catalogue, and everything
+// below applies to both; "films" in it means series on the series map.
+//
 // The database decides which films are on the map and which moods each
 // one belongs to (mood_map_input, mood_map_film_moods -- the same rules as
 // the mood pages). This job works out where everything goes:
@@ -35,12 +41,44 @@
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // Optional: DRY_RUN=true (lay out and report, write nothing)
+//           MAP_MEDIUM=tv (the series map; the film map otherwise)
 
 import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 const DRY_RUN = process.env.DRY_RUN === 'true';
+
+// Where each map is read from and written to. The film map's names are
+// the ones this job has always used.
+const MAP =
+  process.env.MAP_MEDIUM === 'tv'
+    ? {
+        name: 'series mood map',
+        noun: 'series',
+        input: 'tv_mood_map_input',
+        about: 'tv_mood_map_show_moods',
+        medium: 'tv',
+        // "Sad TV shows" on the mood page, "Sad" on the map.
+        suffix: /\s+TV shows$/i,
+        layout: 'tv_mood_map_layout',
+        id: 'show_id',
+        labels: 'tv_mood_map_label_layout',
+        finish: 'tv_mood_map_finish',
+      }
+    : {
+        name: 'mood map',
+        noun: 'films',
+        input: 'mood_map_input',
+        about: 'mood_map_film_moods',
+        medium: 'movie',
+        // "Sad movies" on the mood page, "Sad" on the map.
+        suffix: /\s+movies$/i,
+        layout: 'mood_map_layout',
+        id: 'film_id',
+        labels: 'mood_map_label_layout',
+        finish: 'mood_map_finish',
+      };
 
 // Roughly how many films each film's neighbourhood takes in. Higher keeps
 // more of the big picture, lower more of the fine detail; on this
@@ -121,9 +159,9 @@ async function fetchPaged<T>(fn: string): Promise<T[]> {
 }
 
 async function fetchFilms(): Promise<Film[]> {
-  const readings = await fetchPaged<{ id: string; v: unknown }>('mood_map_input');
+  const readings = await fetchPaged<{ id: string; v: unknown }>(MAP.input);
   const about = await fetchPaged<{ id: string; darkness: number | null; warmth: number | null; moods: string[] | null }>(
-    'mood_map_film_moods',
+    MAP.about,
   );
   const byId = new Map(about.map((r) => [r.id, r]));
 
@@ -156,7 +194,7 @@ async function fetchFilms(): Promise<Film[]> {
   }
   const kept = films.filter((f) => f.v.length === dims);
   if (kept.length < readings.length) {
-    console.log(`Left out ${readings.length - kept.length} films with an unreadable or mismatched reading.`);
+    console.log(`Left out ${readings.length - kept.length} ${MAP.noun} with an unreadable or mismatched reading.`);
   }
   return kept;
 }
@@ -166,13 +204,12 @@ async function fetchMoods(): Promise<Mood[]> {
     .from('shelves')
     .select('slug, title, sort_order')
     .eq('kind', 'mood')
-    .eq('medium', 'movie')
+    .eq('medium', MAP.medium)
     .order('sort_order', { ascending: true });
   if (error) throw error;
   return ((data ?? []) as { slug: string; title: string }[]).map((s) => ({
     slug: s.slug,
-    // "Sad movies" on the mood page, "Sad" on the map.
-    name: s.title.replace(/\s+movies$/i, ''),
+    name: s.title.replace(MAP.suffix, ''),
   }));
 }
 
@@ -683,13 +720,13 @@ function keptNeighbours(y: Float64Array, nn: Neighbours, n: number, k: number): 
 async function main() {
   const started = Date.now();
   const runIso = new Date().toISOString();
-  console.log(`Laying out the mood map${DRY_RUN ? ' (DRY RUN)' : ''}...`);
+  console.log(`Laying out the ${MAP.name}${DRY_RUN ? ' (DRY RUN)' : ''}...`);
 
   const [films, moods] = await Promise.all([fetchFilms(), fetchMoods()]);
   const n = films.length;
   const k = Math.floor(3 * PERPLEXITY);
-  if (n <= k) throw new Error(`Only ${n} films to lay out -- too few for a map.`);
-  console.log(`${n} films, ${films[0].v.length} dimensions, ${moods.length} moods.`);
+  if (n <= k) throw new Error(`Only ${n} ${MAP.noun} to lay out -- too few for a map.`);
+  console.log(`${n} ${MAP.noun}, ${films[0].v.length} dimensions, ${moods.length} moods.`);
 
   const x = films.map((f) => Float64Array.from(f.v));
   const nn = nearestNeighbours(x, k);
@@ -704,11 +741,13 @@ async function main() {
   const pos = orient(start, films);
 
   const kept = keptNeighbours(pos, nn, n, 10);
-  console.log(`On the map, ${(kept * 100).toFixed(1)}% of each film's 10 closest films are among the 10 it feels most like.`);
+  console.log(
+    `On the map, ${(kept * 100).toFixed(1)}% of the 10 ${MAP.noun} nearest each one are among the 10 it feels most like.`,
+  );
 
   const labels = placeLabels(pos, films, moods);
   for (const l of labels) {
-    console.log(`  ${l.name}: ${l.members} films, name at (${Math.round(l.x)}, ${Math.round(l.y)})`);
+    console.log(`  ${l.name}: ${l.members} ${MAP.noun}, name at (${Math.round(l.x)}, ${Math.round(l.y)})`);
   }
   console.log(`Layout took ${((Date.now() - started) / 1000).toFixed(1)}s.`);
 
@@ -717,14 +756,14 @@ async function main() {
     return;
   }
 
-  const rows = films.map((f, i) => ({ film_id: f.id, x: pos[i * 2], y: pos[i * 2 + 1], run_at: runIso }));
+  const rows = films.map((f, i) => ({ [MAP.id]: f.id, x: pos[i * 2], y: pos[i * 2 + 1], run_at: runIso }));
   for (let i = 0; i < rows.length; i += WRITE_CHUNK) {
-    const { error } = await supabase.from('mood_map_layout').upsert(rows.slice(i, i + WRITE_CHUNK), { onConflict: 'film_id' });
+    const { error } = await supabase.from(MAP.layout).upsert(rows.slice(i, i + WRITE_CHUNK), { onConflict: MAP.id });
     if (error) throw error;
   }
   console.log(`Wrote ${rows.length} positions.`);
 
-  const { error: labelError } = await supabase.from('mood_map_label_layout').upsert(
+  const { error: labelError } = await supabase.from(MAP.labels).upsert(
     labels.map((l) => ({
       slug: l.slug,
       title: l.name,
@@ -738,9 +777,9 @@ async function main() {
   );
   if (labelError) throw labelError;
 
-  const { data, error } = await supabase.rpc('mood_map_finish', { p_run: runIso });
+  const { data, error } = await supabase.rpc(MAP.finish, { p_run: runIso });
   if (error) throw error;
-  console.log(`Map updated: ${data} films, ${labels.length} mood names.`);
+  console.log(`Map updated: ${data} ${MAP.noun}, ${labels.length} mood names.`);
   console.log(`Done in ${((Date.now() - started) / 1000).toFixed(1)}s.`);
 }
 
