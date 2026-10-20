@@ -35,9 +35,18 @@
 // start a full catalogue ingestion as a side effect. The rule is
 // duplicated below instead; if it changes there, change it here.
 //
+// Network blips no longer end the run. On 2026-10-20 TMDB reset one
+// connection during the second hundred film lookups and the whole run
+// died with it: 200 films unrefreshed and every series untouched.
+// Every TMDB call and every database call now goes through
+// resilientFetch, which sends a failed request again after a pause (see
+// resilient-fetch.ts), and a title TMDB still cannot serve after that is
+// counted as failed while the run carries on.
+//
 // Required env vars: TMDB_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { API_STATUSES, GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const TMDB_API_KEY = requireEnv('TMDB_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
@@ -55,7 +64,13 @@ const SITE_VISIBLE_VOTES = 300; // kept in step with ingest.ts
 const MIN_OVERVIEW_CHARS = 40; // kept in step with ingest-tv.ts
 const MIN_DESCRIPTIVE_CHARS = 100;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// Reads, upserts and updates are sent again on a gateway failure; the one
+// plain insert (the pipeline_runs row) is not, so it can never land twice.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
+
+const tmdbFetch = resilientFetch({ label: 'TMDB', retryOn: API_STATUSES });
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -63,12 +78,16 @@ function requireEnv(name: string): string {
   return v;
 }
 
+// null when TMDB has no such title, or refuses it. Throws when TMDB still
+// cannot be reached after resilientFetch's retries, so a title that failed
+// is not mistaken for one that does not exist.
 async function tmdbGet(path: string): Promise<any> {
-  const res = await fetch(`https://api.themoviedb.org/3${path}`, {
+  const res = await tmdbFetch(`https://api.themoviedb.org/3${path}`, {
     headers: { Authorization: `Bearer ${TMDB_API_KEY}` },
   });
-  if (!res.ok) return null;
-  return res.json();
+  if (res.ok) return res.json();
+  if (API_STATUSES.has(res.status)) throw new Error(`TMDB answered ${res.status} for ${path.split('?')[0]}`);
+  return null;
 }
 
 function dateOffset(days: number): string {
@@ -126,6 +145,32 @@ async function runWithConcurrency<T, R>(
   }
   await Promise.all(Array.from({ length: limit }, runner));
   return results;
+}
+
+// One title TMDB still cannot serve after the retries is logged and
+// counted, and the batch goes on without it -- before, it ended the run.
+// A batch in which not one title could be read means TMDB itself is down,
+// and that does stop the run: carrying on would only fail every title
+// after it the same way.
+async function hydrateBatch(
+  kind: string,
+  ids: number[],
+  hydrate: (tmdbId: number) => Promise<Record<string, any> | null>,
+): Promise<{ rows: Record<string, any>[]; failed: number }> {
+  let failed = 0;
+  const results = await runWithConcurrency(ids, CONCURRENCY, async (id) => {
+    try {
+      return await hydrate(id);
+    } catch (err) {
+      failed++;
+      console.error(`  ${kind} tmdb_id=${id} could not be read from TMDB: ${(err as Error).message}`);
+      return null;
+    }
+  });
+  if (ids.length > 0 && failed === ids.length) {
+    throw new Error(`TMDB could not serve a single ${kind} in this batch of ${ids.length} -- stopping.`);
+  }
+  return { rows: results.filter((r): r is Record<string, any> => r !== null), failed };
 }
 
 // ---------------------------------------------------------------- movies
@@ -351,14 +396,12 @@ async function main() {
 
   for (let i = 0; i < movieIds.length; i += BATCH_SIZE) {
     const batch = movieIds.slice(i, i + BATCH_SIZE);
-    const hydrated = (await runWithConcurrency(batch, CONCURRENCY, hydrateMovie)).filter(
-      (r): r is Record<string, any> => r !== null,
-    );
-    const { inserted, updated, failed } = await writeRows('movies', hydrated, existingMovies, MOVIE_DRIFT);
+    const hydrated = await hydrateBatch('movie', batch, hydrateMovie);
+    const { inserted, updated, failed } = await writeRows('movies', hydrated.rows, existingMovies, MOVIE_DRIFT);
     processed += inserted + updated;
-    failedTotal += failed;
+    failedTotal += failed + hydrated.failed;
     console.log(
-      `movies ${Math.min(i + BATCH_SIZE, movieIds.length)}/${movieIds.length}: +${inserted} new, ${updated} updated, ${failed} failed`,
+      `movies ${Math.min(i + BATCH_SIZE, movieIds.length)}/${movieIds.length}: +${inserted} new, ${updated} updated, ${failed + hydrated.failed} failed`,
     );
   }
 
@@ -374,14 +417,12 @@ async function main() {
 
   for (let i = 0; i < showIds.length; i += BATCH_SIZE) {
     const batch = showIds.slice(i, i + BATCH_SIZE);
-    const hydrated = (await runWithConcurrency(batch, CONCURRENCY, hydrateShow)).filter(
-      (r): r is Record<string, any> => r !== null,
-    );
-    const { inserted, updated, failed } = await writeRows('tv_shows', hydrated, existingShows, SHOW_DRIFT);
+    const hydrated = await hydrateBatch('series', batch, hydrateShow);
+    const { inserted, updated, failed } = await writeRows('tv_shows', hydrated.rows, existingShows, SHOW_DRIFT);
     processed += inserted + updated;
-    failedTotal += failed;
+    failedTotal += failed + hydrated.failed;
     console.log(
-      `tv ${Math.min(i + BATCH_SIZE, showIds.length)}/${showIds.length}: +${inserted} new, ${updated} updated, ${failed} failed`,
+      `tv ${Math.min(i + BATCH_SIZE, showIds.length)}/${showIds.length}: +${inserted} new, ${updated} updated, ${failed + hydrated.failed} failed`,
     );
   }
 
