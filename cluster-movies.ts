@@ -37,6 +37,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import Anthropic from '@anthropic-ai/sdk';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const ANTHROPIC_API_KEY = requireEnv('ANTHROPIC_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
@@ -51,7 +52,11 @@ const LABEL_SAMPLE_SIZE = 25; // movies sampled per cluster for the naming call
 const LABEL_MODEL = 'claude-sonnet-5';
 const PAGE_SIZE = 1000;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// Reads are sent again on a gateway failure (see resilient-fetch.ts); the
+// cluster and assignment inserts are not, so none of them can land twice.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 function requireEnv(name: string): string {

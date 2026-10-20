@@ -18,6 +18,7 @@
 // Optional: DRY_RUN=true
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
@@ -27,12 +28,56 @@ const SECONDARY_MULTIPLIER = 1.4; // must match cluster-movies.ts
 const MAX_CLUSTERS_PER_MOVIE = 4; // must match cluster-movies.ts
 const PAGE_SIZE = 1000;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// refresh_cluster_popularity sets each cluster's counts from its
+// assignments as they stand, so a second call leaves the same rows. But a
+// call the gateway drops may still be running in the database, so it is
+// sent again only after the 60s statement timeout has run out on the
+// first, and at most twice.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
+
+// Reads and the assignment upsert are sent again on a gateway failure (see
+// resilient-fetch.ts) -- the upsert leaves a pair that is already there as
+// it is, so landing twice changes nothing -- and refresh_cluster_popularity
+// is left to rpcWithGatewayRetry, below.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
+}
+
+// Calls a database function that leaves the same rows however many times
+// it runs, and sends it again after GATEWAY_PAUSE_MS when the gateway
+// drops it. Any other failure comes back to the caller as before.
+async function rpcWithGatewayRetry(
+  name: string,
+  args?: Record<string, unknown>,
+  gatewayRetries = 0,
+): Promise<{ data: any; error: any }> {
+  const { data, error, status } = await supabase.rpc(name, args);
+  if (error && isGatewayFailure(status) && gatewayRetries < GATEWAY_RETRIES) {
+    console.log(
+      `  no answer from the database for ${name} (status ${status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    return rpcWithGatewayRetry(name, args, gatewayRetries + 1);
+  }
+  return { data, error };
 }
 
 function normalize(v: number[]): number[] {
@@ -164,7 +209,7 @@ async function main() {
   }
 
   console.log('Refreshing cluster popularity (avg_vote_count, film_count)...');
-  const { data: refreshed, error: refreshError } = await supabase.rpc('refresh_cluster_popularity');
+  const { data: refreshed, error: refreshError } = await rpcWithGatewayRetry('refresh_cluster_popularity');
   if (refreshError) throw refreshError;
   console.log(`Popularity refreshed for ${refreshed} clusters.`);
 

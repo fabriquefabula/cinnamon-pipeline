@@ -20,6 +20,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import Anthropic from '@anthropic-ai/sdk';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const ANTHROPIC_API_KEY = requireEnv('ANTHROPIC_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
@@ -30,7 +31,12 @@ const SAMPLE_SIZE = 40; // larger than the usual 15-20 -- these groups are bigge
 const LABEL_MODEL = 'claude-sonnet-5';
 const NO_THEME_SENTINEL = 'NO_COHERENT_THEME';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// Reads, the relabeling updates and the deletes are sent again on a
+// gateway failure (see resilient-fetch.ts) -- each leaves the same rows
+// however many times it lands.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 function requireEnv(name: string): string {

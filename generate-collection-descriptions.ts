@@ -26,6 +26,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import Anthropic from '@anthropic-ai/sdk';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const ANTHROPIC_API_KEY = requireEnv('ANTHROPIC_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
@@ -39,7 +40,19 @@ const MEDIA = (process.env.MEDIA ?? 'all').toLowerCase() as 'movie' | 'tv' | 'al
 const SAMPLE_SIZE = 20;
 const DESCRIPTION_MODEL = 'claude-sonnet-5';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// Reads and the description updates are sent again on a gateway failure
+// (see resilient-fetch.ts), so a blip no longer loses a description that
+// has already been paid for.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: {
+    fetch: resilientFetch({
+      label: 'database',
+      retryOn: GATEWAY_STATUSES,
+      // Read-only (STABLE) function this job calls; it may be sent again like any read.
+      repeatRpc: (name) => name === 'movies_by_keywords_sample',
+    }),
+  },
+});
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 function requireEnv(name: string): string {

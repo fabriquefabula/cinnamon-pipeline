@@ -21,6 +21,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import Anthropic from '@anthropic-ai/sdk';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const ANTHROPIC_API_KEY = requireEnv('ANTHROPIC_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
@@ -30,7 +31,12 @@ const DRY_RUN = process.env.DRY_RUN !== 'false';
 const LIMIT = process.env.LIMIT ? parseInt(process.env.LIMIT, 10) : undefined;
 const LABEL_MODEL = 'claude-sonnet-5';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// Reads and the display_label updates are sent again on a gateway failure
+// (see resilient-fetch.ts), so a blip no longer loses a label that has
+// already been paid for.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 function requireEnv(name: string): string {

@@ -28,6 +28,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import Anthropic from '@anthropic-ai/sdk';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const ANTHROPIC_API_KEY = requireEnv('ANTHROPIC_API_KEY');
 const VOYAGE_API_KEY = requireEnv('VOYAGE_API_KEY');
@@ -43,6 +44,15 @@ const EMBED_DIMENSION = 1024;
 const EMBED_BATCH_SIZE = 128; // well under Voyage's 1000-input cap; keeps individual requests small
 const LABEL_MODEL = 'claude-sonnet-5';
 const LABEL_SAMPLE_SIZE = 20;
+
+// rebuild_topic_vectors leaves the same rows however many times it runs
+// with the same arguments: it adds only the group dimensions that are
+// missing, renumbers them all, and upserts each film's profile. But a call
+// the gateway drops may still be running in the database, so it is sent
+// again only after the 60s statement timeout has run out on the first, and
+// at most twice.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
 
 // Production/format/meta tags -- real TMDB keywords, but not a theme
 // worth clustering. Filtered out before embedding, so no group ever
@@ -112,13 +122,49 @@ function isQualityKeyword(keyword: string): boolean {
   );
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// Reads and the clearing delete are sent again on a gateway failure (see
+// resilient-fetch.ts); the group and membership inserts are not, so none of
+// them can land twice. rebuild_topic_vectors is left to
+// rpcWithGatewayRetry, below.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
+}
+
+// Calls a database function that leaves the same rows however many times
+// it runs, and sends it again after GATEWAY_PAUSE_MS when the gateway
+// drops it. Any other failure comes back to the caller as before.
+async function rpcWithGatewayRetry(
+  name: string,
+  args?: Record<string, unknown>,
+  gatewayRetries = 0,
+): Promise<{ data: any; error: any }> {
+  const { data, error, status } = await supabase.rpc(name, args);
+  if (error && isGatewayFailure(status) && gatewayRetries < GATEWAY_RETRIES) {
+    console.log(
+      `  no answer from the database for ${name} (status ${status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    return rpcWithGatewayRetry(name, args, gatewayRetries + 1);
+  }
+  return { data, error };
 }
 
 // Distinct keywords across the whole catalog, with counts -- keeps only
@@ -375,7 +421,7 @@ async function main() {
   const TOPIC_PARTS = 4;
   let rebuilt = 0;
   for (let part = 0; part < TOPIC_PARTS; part++) {
-    const { data: n, error: topicError } = await supabase.rpc('rebuild_topic_vectors', {
+    const { data: n, error: topicError } = await rpcWithGatewayRetry('rebuild_topic_vectors', {
       p_part: part, p_parts: TOPIC_PARTS, p_dims: part === 0,
     });
     if (topicError) throw topicError;

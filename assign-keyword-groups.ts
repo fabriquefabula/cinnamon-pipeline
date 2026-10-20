@@ -16,6 +16,7 @@
 // Required env vars: VOYAGE_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const VOYAGE_API_KEY = requireEnv('VOYAGE_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
@@ -68,7 +69,12 @@ function isQualityKeyword(keyword: string): boolean {
   );
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// Reads and the keyword_count updates are sent again on a gateway failure
+// (see resilient-fetch.ts); the membership insert is not, so it can never
+// land twice.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 
 function requireEnv(name: string): string {
   const v = process.env[name];
