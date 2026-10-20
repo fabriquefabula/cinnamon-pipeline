@@ -19,6 +19,7 @@
 // Required env vars: TMDB_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { API_STATUSES, GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const TMDB_API_KEY = requireEnv('TMDB_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
@@ -46,12 +47,42 @@ const EARLIEST_YEAR = 1900;
 // search functions use.
 const SITE_VISIBLE_VOTES = 300;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// refresh_scoring_eligibility only sets scoring_eligible on films that
+// meet the rule and do not have it yet, so a second call leaves exactly
+// the rows the first one did -- even one that met the first still
+// running, which would wait for it and find nothing left to set. A call
+// the gateway drops is sent again after a pause far longer than the
+// refresh takes (about a second), and at most twice.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
+
+// A dropped connection or a gateway error is sent again where that is
+// safe (see resilient-fetch.ts), instead of ending the run. The two plain
+// inserts -- the pipeline_runs row and the new movies -- are not, so
+// neither can land twice; the eligibility refresh is left to
+// refreshExistingEligibility, below.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
+
+// TMDB calls are sent again on a dropped connection, a rate limit or a
+// 5xx (see resilient-fetch.ts).
+const tmdbFetch = resilientFetch({ label: 'TMDB', retryOn: API_STATUSES });
 
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
 }
 
 interface DiscoverResult {
@@ -62,7 +93,7 @@ interface DiscoverResult {
 }
 
 async function tmdbGet(path: string): Promise<any> {
-  const res = await fetch(`https://api.themoviedb.org/3${path}`, {
+  const res = await tmdbFetch(`https://api.themoviedb.org/3${path}`, {
     headers: { Authorization: `Bearer ${TMDB_API_KEY}` },
   });
   if (!res.ok) return null;
@@ -310,10 +341,18 @@ async function runWithConcurrency<T, R>(
 // whatever its metadata looked like the week it arrived. This re-runs the
 // current rule over the existing catalogue, which is where the 673
 // locked-out films came from.
-async function refreshExistingEligibility(): Promise<void> {
-  const { data, error } = await supabase.rpc('refresh_scoring_eligibility', {
+async function refreshExistingEligibility(gatewayRetries = 0): Promise<void> {
+  const { data, error, status } = await supabase.rpc('refresh_scoring_eligibility', {
     p_min_votes: SITE_VISIBLE_VOTES,
   });
+  if (error && isGatewayFailure(status) && gatewayRetries < GATEWAY_RETRIES) {
+    console.log(
+      `  no answer from the database for the eligibility refresh (status ${status}) -- ` +
+        `sending it again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    return refreshExistingEligibility(gatewayRetries + 1);
+  }
   if (error) {
     // Never fail the ingest over this: the new titles are already in.
     console.error('Eligibility refresh failed:', error.message);
