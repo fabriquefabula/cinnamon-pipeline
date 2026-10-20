@@ -25,6 +25,7 @@
 // Required env vars: TMDB_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { API_STATUSES, GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const TMDB_API_KEY = requireEnv('TMDB_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
@@ -52,12 +53,31 @@ const CONCURRENCY = 20; // same as the other TMDB jobs
 const WRITE_BATCH = 100;
 const PAGE_SIZE = 1000;
 
+// apply_watch_providers sets two columns on the rows it is given, to
+// values carried in the call, so a second call leaves exactly the rows
+// the first one did. A call the gateway drops may still be running in the
+// database, though, so it is sent again only after the 60s statement
+// timeout has run out on the first, and at most twice.
+const GATEWAY_RETRIES = 2;
+const GATEWAY_PAUSE_MS = 65000;
+
 // Ordered as they are displayed. 'free' and 'ads' only appear for some
 // countries, and are worth keeping: "free with ads" is a real answer to
 // "where can I watch this".
 const KINDS = ['flatrate', 'free', 'ads', 'rent', 'buy'] as const;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// A dropped connection or a gateway error is sent again where that is
+// safe (see resilient-fetch.ts), instead of ending the run. That covers
+// the reads; the apply_watch_providers calls are left to writeRows,
+// below, and the one plain insert (the pipeline_runs row) is never
+// repeated, so it cannot land twice.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
+
+// TMDB calls are sent again on a dropped connection, a rate limit or a
+// 5xx (see resilient-fetch.ts).
+const tmdbFetch = resilientFetch({ label: 'TMDB', retryOn: API_STATUSES });
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -65,8 +85,18 @@ function requireEnv(name: string): string {
   return v;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// No answer from behind the gateway: a gateway status, or no answer at
+// all (status 0 is how the client reports a request that never got one).
+function isGatewayFailure(status: number): boolean {
+  return status === 0 || GATEWAY_STATUSES.has(status);
+}
+
 async function tmdbGet(path: string): Promise<any> {
-  const res = await fetch(`https://api.themoviedb.org/3${path}`, {
+  const res = await tmdbFetch(`https://api.themoviedb.org/3${path}`, {
     headers: { Authorization: `Bearer ${TMDB_API_KEY}` },
   });
   if (!res.ok) return null;
@@ -214,10 +244,10 @@ async function runWithConcurrency<T, R>(
 // or malformed row taking the other 99 with it -- the failure mode
 // ingest-tv.ts hit on its first full run, where a single duplicate in a
 // 500-row statement discarded all 500.
-async function writeRows(media: 'movie' | 'tv', rows: Row[]): Promise<{ written: number; failed: number }> {
+async function writeRows(media: 'movie' | 'tv', rows: Row[], gatewayRetries = 0): Promise<{ written: number; failed: number }> {
   if (rows.length === 0) return { written: 0, failed: 0 };
 
-  const { data, error } = await supabase.rpc('apply_watch_providers', {
+  const { data, error, status } = await supabase.rpc('apply_watch_providers', {
     p_media: media,
     p_rows: rows,
   });
@@ -232,6 +262,15 @@ async function writeRows(media: 'movie' | 'tv', rows: Row[]): Promise<{ written:
       console.error(`${media}: ${rows.length - matched} id(s) matched no row.`);
     }
     return { written: matched, failed: rows.length - matched };
+  }
+
+  if (isGatewayFailure(status) && gatewayRetries < GATEWAY_RETRIES) {
+    console.log(
+      `  ${media}: no answer from the database for ${rows.length} row(s) (status ${status}) -- ` +
+        `sending them again in ${GATEWAY_PAUSE_MS / 1000}s`,
+    );
+    await sleep(GATEWAY_PAUSE_MS);
+    return writeRows(media, rows, gatewayRetries + 1);
   }
 
   if (rows.length === 1) {

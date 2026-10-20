@@ -10,12 +10,25 @@
 // Required env vars: TMDB_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 import { createClient } from '@supabase/supabase-js';
+import { API_STATUSES, GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY!;
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// A dropped connection or a gateway error is sent again where that is
+// safe (see resilient-fetch.ts), instead of ending the run. That covers
+// the reads, the people upserts and the creator_credits updates; the
+// tv_credits insert is a plain insert, so it is never sent twice and can
+// never land twice.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
+
+// TMDB calls are sent again on a dropped connection, a rate limit or a
+// 5xx (see resilient-fetch.ts). The 15s timeout in fetchShowCredits still
+// covers the whole call, retries included.
+const tmdbFetch = resilientFetch({ label: 'TMDB', retryOn: API_STATUSES });
 
 // Same depth as the movie side. Aggregate cast lists for long-running
 // series can run to hundreds of names once every guest star across ten
@@ -70,7 +83,7 @@ async function fetchShowCredits(tmdbId: number): Promise<ShowCredits | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const res = await fetch(
+    const res = await tmdbFetch(
       `https://api.themoviedb.org/3/tv/${tmdbId}?append_to_response=aggregate_credits`,
       {
         headers: {

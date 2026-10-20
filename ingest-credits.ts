@@ -1,10 +1,23 @@
 import { createClient } from '@supabase/supabase-js';
+import { API_STATUSES, GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const TMDB_API_KEY = process.env.TMDB_API_KEY!;
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+// A dropped connection or a gateway error is sent again where that is
+// safe (see resilient-fetch.ts), instead of ending the run. That covers
+// the reads, the people upserts and the director_credits updates; the
+// movie_credits insert is a plain insert, so it is never sent twice and
+// can never land twice.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
+
+// TMDB calls are sent again on a dropped connection, a rate limit or a
+// 5xx (see resilient-fetch.ts). The 15s timeout in fetchCredits still
+// covers the whole call, retries included.
+const tmdbFetch = resilientFetch({ label: 'TMDB', retryOn: API_STATUSES });
 
 // Top-billed only -- TMDB's cast lists can run 50+ deep for some films,
 // and only the top of the bill matters for an "Ensemble" section or for
@@ -37,7 +50,7 @@ async function fetchCredits(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const res = await fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/credits`, {
+    const res = await tmdbFetch(`https://api.themoviedb.org/3/movie/${tmdbId}/credits`, {
       headers: {
         Authorization: `Bearer ${TMDB_API_KEY}`,
         accept: 'application/json',

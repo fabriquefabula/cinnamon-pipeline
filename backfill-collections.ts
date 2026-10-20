@@ -17,6 +17,7 @@
 // Optional: DRY_RUN=true, MOVIE_LIMIT=<n>
 
 import { createClient } from '@supabase/supabase-js';
+import { GATEWAY_STATUSES, resilientFetch } from './resilient-fetch';
 
 const TMDB_API_KEY = requireEnv('TMDB_API_KEY');
 const SUPABASE_URL = requireEnv('SUPABASE_URL');
@@ -26,7 +27,15 @@ const CONCURRENCY = 12; // under TMDB's ~40-50 req/s soft limit
 const PAGE_SIZE = 500;
 const MAX_ATTEMPTS = 4;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// A dropped connection or a gateway error is sent again where that is
+// safe (see resilient-fetch.ts), instead of ending the run. This job only
+// reads and updates, and both are safe to send twice. The TMDB lookups
+// keep their own loop in fetchCollection, which already sends a request
+// again on a dropped connection, a 429 or a 5xx, so they do not go
+// through resilientFetch as well.
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
+});
 
 function requireEnv(name: string): string {
   const v = process.env[name];
