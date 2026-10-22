@@ -1,0 +1,81 @@
+name: Promo Posters
+
+# Saves the posters of the films a promo video shows to the promo-assets
+# branch, at TMDB's largest size, so they can be cut into the video
+# sharp. The films are listed in promo-posters.txt, one slug per line.
+#
+# Nothing on the site or in main reads the branch: it holds only the
+# images and is replaced on every run.
+
+on:
+  workflow_dispatch:
+  # Runs once whenever the list or the job changes.
+  push:
+    branches: [main]
+    paths:
+      - 'promo-posters.txt'
+      - '.github/workflows/promo-posters.yml'
+
+concurrency:
+  group: promo-posters
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the posters
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          slugs = [l.strip() for l in open('promo-posters.txt') if l.strip() and not l.startswith('#')]
+          base = os.environ['SUPABASE_URL'].rstrip('/')
+          key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+          query = base + '/rest/v1/movies?select=slug,poster_url&slug=in.(' + ','.join(slugs) + ')'
+          req = urllib.request.Request(query, headers={'apikey': key, 'Authorization': 'Bearer ' + key})
+          with urllib.request.urlopen(req, timeout=60) as r:
+              found = {row['slug']: row['poster_url'] for row in json.load(r)}
+
+          os.makedirs('out/posters', exist_ok=True)
+          missing = []
+          for slug in slugs:
+              url = found.get(slug)
+              if not url:
+                  missing.append(slug)
+                  continue
+              # The stored address is TMDB's w500; w780 is the largest
+              # fixed size, sharp at any size the video draws.
+              big = url.replace('/w500/', '/w780/')
+              req = urllib.request.Request(big, headers={'User-Agent': 'cinnamondb-promo/1 (+https://www.cinnamondb.com)'})
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  data = r.read()
+              with open('out/posters/' + slug + '.jpg', 'wb') as f:
+                  f.write(data)
+              print(slug, len(data), 'bytes')
+
+          if missing:
+              print('::warning::no poster address for ' + ', '.join(missing))
+          if len(missing) == len(slugs):
+              sys.exit('no posters saved')
+          PY
+      - name: Save them to the promo-assets branch
+        run: |
+          cd out
+          git init -q -b promo-assets
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add posters
+          git commit -q -m 'Posters for the promo video'
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" promo-assets

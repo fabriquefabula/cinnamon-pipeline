@@ -1,0 +1,19 @@
+# Films whose posters a promo video uses, one slug per line.
+# Saved to the promo-assets branch by .github/workflows/promo-posters.yml.
+interstellar-2014
+the-martian-2015
+project-hail-mary-2026
+everything-everywhere-all-at-once-2022
+alien-1979
+m3gan-2022
+life-2017
+the-lord-of-the-rings-the-fellowship-of-the-ring-2001
+harry-potter-and-the-order-of-the-phoenix-2007
+spirited-away-2001
+life-of-pi-2012
+the-da-vinci-code-2006
+the-matrix-resurrections-2021
+les-miserables-2012
+the-prince-of-egypt-1998
+warriors-of-the-wind-1984
+the-city-of-lost-children-1995
