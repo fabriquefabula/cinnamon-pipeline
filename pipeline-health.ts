@@ -67,7 +67,11 @@ const LIMITS = {
   tvPopularityMaxAge: 48 * HOUR, // daily, 07:30 UTC
   availabilityMaxAge: 48 * HOUR, // daily, 08:30 UTC
   upcomingIngestMaxAge: 48 * HOUR, // daily, 06:00 UTC
-  movieRailMaxAge: 48 * HOUR, // daily, 13:00 UTC
+  // How long a newly scored film may wait for its rails. The rail job runs
+  // daily at 13:00 UTC, but it only has work after a scoring batch, and
+  // films are scored once a week (Sundays 10:30 UTC, cinnamon-scoring).
+  // See railFreshness() for why this is not an age limit on the last run.
+  movieRailMaxAge: 48 * HOUR,
 
   // How long a scored row may sit unprocessed before it counts as stuck.
   //
@@ -143,6 +147,45 @@ function freshness(name: string, iso: string | null, maxAge: number, now: number
   return { name, severity: 'ok', detail: `last run ${fmtAge(age)} ago` };
 }
 
+// Rails are made for newly scored films, and films arrive in a weekly
+// batch. Between batches the rail job finds nothing to do, writes nothing,
+// and the newest row in movie_neighbors simply gets older -- in a pipeline
+// that is working exactly as designed. Judged as a plain freshness check,
+// that failed every week from Thursday until the next batch's rails
+// (first on 2026-10-23: nothing scored since the 18th, 81 films queued for
+// Sunday's scoring, rails last written on the 21st).
+//
+// So the clock only runs while films are waiting for rails, and it is the
+// oldest waiting film that is timed: a film scored more than two days ago
+// with no rail run since means the job has stopped, whatever the cause.
+// With nothing waiting there is nothing to be late with.
+function railFreshness(h: Health, now: number): Check {
+  const name = 'movie_rails';
+  const lastAge = ageMs(h.last_movie_rail, now);
+  const last = lastAge === null ? 'never run' : `last run ${fmtAge(lastAge)} ago`;
+  if (h.movies_awaiting_rails === 0) {
+    return { name, severity: 'ok', detail: `nothing waiting for rails, ${last}` };
+  }
+  const waited = ageMs(h.movies_awaiting_rails_oldest, now);
+  if (waited === null) {
+    return { name, severity: 'ok', detail: `${h.movies_awaiting_rails} films waiting, age unknown, ${last}` };
+  }
+  if (waited > LIMITS.movieRailMaxAge) {
+    return {
+      name,
+      severity: 'fail',
+      detail:
+        `${h.movies_awaiting_rails} films waiting, oldest scored ${fmtAge(waited)} ago, ` +
+        `limit ${fmtAge(LIMITS.movieRailMaxAge)}; ${last}`,
+    };
+  }
+  return {
+    name,
+    severity: 'ok',
+    detail: `${h.movies_awaiting_rails} films waiting, oldest scored ${fmtAge(waited)} ago, ${last}`,
+  };
+}
+
 // A queue check, judged on how long the oldest row has waited rather than
 // on how many are waiting. See LIMITS.drainMaxAge for why.
 //
@@ -186,7 +229,7 @@ function evaluate(h: Health): Check[] {
     // frozen air date ages past the window.
     freshness('tv_popularity_refresh', h.last_tv_popularity_refresh, LIMITS.tvPopularityMaxAge, now),
     freshness('availability_refresh', h.last_availability_refresh, LIMITS.availabilityMaxAge, now),
-    freshness('movie_rails', h.last_movie_rail, LIMITS.movieRailMaxAge, now),
+    railFreshness(h, now),
 
     drain('movies_awaiting_rails', h.movies_awaiting_rails, h.movies_awaiting_rails_oldest, now),
     drain('tv_awaiting_clusters', h.tv_awaiting_clusters, h.tv_awaiting_clusters_oldest, now),
