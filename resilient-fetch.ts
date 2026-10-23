@@ -7,6 +7,13 @@
 // part-way through 300 films (2026-10-20). Nothing was wrong with either
 // job; one request failed and nothing sent it again.
 //
+// A third, assign-movie-clusters (2026-10-23), was lost to a 555 on its
+// first read: the database gateway's own "Internal server error.", in
+// plain text, after ten seconds with no answer from behind it. The same
+// read had taken under a second the day before, and every other request
+// in that minute was answered in milliseconds. A 555 is a gateway status
+// like 502 or 504 and is sent again like one (GATEWAY_STATUSES, below).
+//
 // resilientFetch() sends a request again, after a growing pause, when it
 // fails before an answer arrives (connection reset, refused, timed out, or
 // cut off part-way through the body) or when the answer is one of
@@ -46,8 +53,12 @@ export interface ResilientFetchOptions {
   repeatRpc?: (name: string) => boolean;
 }
 
-/** The request never got a real answer from behind the gateway. */
-export const GATEWAY_STATUSES: ReadonlySet<number> = new Set([502, 503, 504, 520, 521, 522, 523, 524]);
+/**
+ * The request never got a real answer from behind the gateway. 555 is what
+ * the database gateway answers, in plain text, when it gives up after ten
+ * seconds without one (seen 2026-10-22 and 2026-10-23).
+ */
+export const GATEWAY_STATUSES: ReadonlySet<number> = new Set([502, 503, 504, 520, 521, 522, 523, 524, 555]);
 
 /** For an API whose rate limits and 500s pass after a moment (TMDB). */
 export const API_STATUSES: ReadonlySet<number> = new Set([429, 500, ...GATEWAY_STATUSES]);
