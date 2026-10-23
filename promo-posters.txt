@@ -1,5 +1,6 @@
 # Films whose posters a promo video uses, one slug per line.
 # Saved to the promo-assets branch by .github/workflows/promo-posters.yml.
+# The Interstellar video
 interstellar-2014
 the-martian-2015
 project-hail-mary-2026
@@ -17,3 +18,35 @@ les-miserables-2012
 the-prince-of-egypt-1998
 warriors-of-the-wind-1984
 the-city-of-lost-children-1995
+# The Pepe Silvia video
+shrek-2001
+titanic-1997
+the-dark-knight-2008
+barbie-2023
+oppenheimer-2023
+inception-2010
+pulp-fiction-1994
+the-godfather-1972
+jurassic-park-1993
+star-wars-1977
+toy-story-1995
+mamma-mia-2008
+paddington-2-2017
+the-shawshank-redemption-1994
+dune-2021
+parasite-2019
+get-out-2017
+la-la-land-2016
+gravity-2013
+back-to-the-future-1985
+mean-girls-2004
+the-notebook-2004
+twilight-2008
+frozen-2013
+avatar-2009
+fight-club-1999
+the-lion-king-1994
+finding-nemo-2003
+home-alone-1990
+the-matrix-1999
+forrest-gump-1994
