@@ -2,34 +2,19 @@
 # optional number of frames after the slug (ten if left out).
 # Saved to the promo-assets branch as stills/<slug>-<n>.jpg by
 # .github/workflows/promo-posters.yml.
-# Every kind of scared
-# Paranoid
-get-out-2017 12
-black-swan-2010 12
-rosemary-s-baby-1968 12
-the-wailing-2016 12
-invasion-of-the-body-snatchers-1978 12
-# Slow dread
-the-shining-1980 12
-the-exorcist-1973 12
-hereditary-2018 12
-the-witch-2016 12
-the-others-2001 12
-# Body horror
-alien-1979 12
-the-substance-2024 12
-the-fly-1986 12
-raw-2017 12
-an-american-werewolf-in-london-1981 12
-# Cosmic
-the-thing-1982 12
-the-mist-2007 12
-the-lighthouse-2019 12
-in-the-mouth-of-madness-1995 12
-possession-1981 12
-# Broad daylight
-jaws-1975 12
-midsommar-2019 12
-the-birds-1963 12
-the-texas-chain-saw-massacre-1974 12
-the-wicker-man-1973 40
+# Your favourite film has a hidden twin
+nine-queens-2000 15
+the-second-mother-2015 15
+woman-in-the-dunes-1964 15
+on-body-and-soul-2017 15
+a-bittersweet-life-2005 15
+a-short-film-about-killing-1988 15
+summer-of-85-2020 15
+embrace-of-the-serpent-2015 15
+confessions-2010 15
+yi-yi-2000 15
+# alternates
+close-2022 15
+love-letter-1995 15
+dolls-2002 15
+laurence-anyways-2012 15
