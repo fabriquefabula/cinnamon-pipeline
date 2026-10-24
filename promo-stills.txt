@@ -2,20 +2,19 @@
 # optional number of frames after the slug (ten if left out).
 # Saved to the promo-assets branch as stills/<slug>-<n>.jpg by
 # .github/workflows/promo-posters.yml.
-# The Cinnamon Hundred, one film from every decade
-the-cabinet-of-dr-caligari-1920 15
-the-great-dictator-1940 15
-rashomon-1950 15
-persona-1966 15
-stalker-1979 15
-cinema-paradiso-1988 15
-chungking-express-1994 15
-city-of-god-2002 15
-the-handmaiden-2016 15
-the-father-2020 15
-# alternates
-12-angry-men-1957 15
-8-1-2-1963 15
-come-and-see-1985 15
-in-the-mood-for-love-2000 15
+# These classics flopped (the films not already saved)
+edge-of-tomorrow-2014 15
+scott-pilgrim-vs-the-world-2010 15
+willy-wonka-the-chocolate-factory-1971 15
+the-rocky-horror-picture-show-1975 15
+# The Cinnamon Hundred
+back-to-the-future-1985 15
+se7en-1995 15
+the-truman-show-1998 15
+the-matrix-1999 15
+kill-bill-vol-1-2003 15
+the-dark-knight-2008 15
+the-wolf-of-wall-street-2013 15
 whiplash-2014 15
+deadpool-2016 15
+dune-part-two-2024 15
