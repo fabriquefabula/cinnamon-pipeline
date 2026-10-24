@@ -2,19 +2,8 @@
 # optional number of frames after the slug (ten if left out).
 # Saved to the promo-assets branch as stills/<slug>-<n>.jpg by
 # .github/workflows/promo-posters.yml.
-# These classics flopped (the films not already saved)
-edge-of-tomorrow-2014 15
-scott-pilgrim-vs-the-world-2010 15
-willy-wonka-the-chocolate-factory-1971 15
-the-rocky-horror-picture-show-1975 15
-# The Cinnamon Hundred
-back-to-the-future-1985 15
-se7en-1995 15
-the-truman-show-1998 15
-the-matrix-1999 15
-kill-bill-vol-1-2003 15
-the-dark-knight-2008 15
-the-wolf-of-wall-street-2013 15
-whiplash-2014 15
-deadpool-2016 15
-dune-part-two-2024 15
+# The Cinnamon Hundred (the films not already saved)
+eternal-sunshine-of-the-spotless-mind-2004 15
+# alternates
+her-2013 15
+pulp-fiction-1994 15
