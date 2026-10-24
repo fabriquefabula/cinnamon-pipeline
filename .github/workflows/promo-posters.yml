@@ -5,7 +5,8 @@ name: Promo Posters
 #   posters/<slug>.jpg     the films in promo-posters.txt, at TMDB's largest
 #                          fixed poster size (w780)
 #   stills/<slug>-<n>.jpg  the films in promo-stills.txt: up to ten frames
-#                          each at w1280, frames without title text first
+#                          each (or the number after the slug) at w1280,
+#                          frames without title text first
 #
 # Nothing on the site or in main reads the branch: it holds only the
 # images and is replaced on every run.
@@ -52,10 +53,14 @@ jobs:
           TM = {'Authorization': 'Bearer ' + os.environ['TMDB_API_KEY'], 'accept': 'application/json'}
 
 
-          def slugs_in(path):
+          def lines_in(path):
               if not os.path.exists(path):
                   return []
-              return [l.strip() for l in open(path) if l.strip() and not l.startswith('#')]
+              return [l.split() for l in open(path) if l.strip() and not l.startswith('#')]
+
+
+          def slugs_in(path):
+              return [parts[0] for parts in lines_in(path)]
 
 
           def get_json(url, headers):
@@ -100,7 +105,9 @@ jobs:
           # Stills. Frames with no title text on them come first (TMDB
           # stores those with no language), best voted first; frames with
           # English text only fill in when a film has too few clean ones.
-          still_slugs = slugs_in('promo-stills.txt')
+          still_lines = lines_in('promo-stills.txt')
+          still_slugs = [parts[0] for parts in still_lines]
+          wanted = {parts[0]: int(parts[1]) if len(parts) > 1 else 10 for parts in still_lines}
           found = movies(still_slugs, 'slug,tmdb_id')
           os.makedirs('out/stills', exist_ok=True)
           for slug in still_slugs:
@@ -112,7 +119,7 @@ jobs:
               backdrops = imgs.get('backdrops') or []
               picked = sorted(backdrops, key=lambda b: (b.get('iso_639_1') is not None,
                                                         -(b.get('vote_average') or 0),
-                                                        -(b.get('vote_count') or 0)))[:10]
+                                                        -(b.get('vote_count') or 0)))[:wanted[slug]]
               if not picked:
                   missing.append(slug)
                   continue
