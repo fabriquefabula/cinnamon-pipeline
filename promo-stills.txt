@@ -2,19 +2,19 @@
 # optional number of frames after the slug (ten if left out).
 # Saved to the promo-assets branch as stills/<slug>-<n>.jpg by
 # .github/workflows/promo-posters.yml.
-# Your favourite film has a hidden twin
-nine-queens-2000 15
-the-second-mother-2015 15
-woman-in-the-dunes-1964 15
-on-body-and-soul-2017 15
-a-bittersweet-life-2005 15
-a-short-film-about-killing-1988 15
-summer-of-85-2020 15
-embrace-of-the-serpent-2015 15
-confessions-2010 15
-yi-yi-2000 15
+# These classics flopped
+fight-club-1999 15
+the-shawshank-redemption-1994 15
+blade-runner-1982 15
+donnie-darko-2001 15
+the-thing-1982 15
+children-of-men-2006 15
+vertigo-1958 15
+citizen-kane-1941 15
+it-s-a-wonderful-life-1946 15
+the-night-of-the-hunter-1955 15
 # alternates
-close-2022 15
-love-letter-1995 15
-dolls-2002 15
-laurence-anyways-2012 15
+once-upon-a-time-in-america-1984 15
+brazil-1985 15
+harold-and-maude-1971 15
+peeping-tom-1960 15
