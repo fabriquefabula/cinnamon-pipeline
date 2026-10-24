@@ -50,3 +50,20 @@ finding-nemo-2003
 home-alone-1990
 the-matrix-1999
 forrest-gump-1994
+# Halloween movies for people who hate horror
+hocus-pocus-1993
+the-addams-family-1991
+the-nightmare-before-christmas-1993
+young-frankenstein-1974
+monsters-inc-2001
+corpse-bride-2005
+hotel-transylvania-2012
+what-we-do-in-the-shadows-2014
+coraline-2009
+# alternates
+frankenweenie-2012
+edward-scissorhands-1990
+kiki-s-delivery-service-1989
+coco-2017
+ghostbusters-1984
+beetlejuice-1988
