@@ -3,16 +3,15 @@
 # Saved to the promo-assets branch as stills/<slug>-<n>.jpg by
 # .github/workflows/promo-posters.yml.
 # Movies that are secretly about grief
-inception-2010 20
-up-2009 15
-coco-2017 15
-arrival-2016 15
-life-of-pi-2012 15
-hereditary-2018 15
-midsommar-2019 15
-big-fish-2003 15
-lilo-stitch-2002 15
-godzilla-minus-one-2023 15
-# alternates
-pan-s-labyrinth-2006
-a-monster-calls-2016
+the-grand-budapest-hotel-2014 20
+children-of-men-2006 20
+vertigo-1958 20
+nomadland-2021 20
+the-great-beauty-2013 20
+inside-llewyn-davis-2013 20
+lars-and-the-real-girl-2007 20
+aftersun-2022 20
+solaris-1972 20
+hiroshima-mon-amour-1959 20
+# alternate
+fireworks-1997 20
