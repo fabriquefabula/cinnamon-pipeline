@@ -1,0 +1,15 @@
+# Films whose stills a promo carousel uses, one slug per line.
+# Saved to the promo-assets branch as stills/<slug>-<n>.jpg by
+# .github/workflows/promo-posters.yml.
+# Movies that feel like autumn
+harry-potter-and-the-prisoner-of-azkaban-2004
+knives-out-2019
+good-will-hunting-1997
+donnie-darko-2001
+dead-poets-society-1989
+the-perks-of-being-a-wallflower-2012
+little-women-2019
+fantastic-mr-fox-2009
+# alternates
+when-harry-met-sally-1989
+lady-bird-2017

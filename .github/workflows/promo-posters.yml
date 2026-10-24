@@ -1,19 +1,23 @@
 name: Promo Posters
 
-# Saves the posters of the films a promo video shows to the promo-assets
-# branch, at TMDB's largest size, so they can be cut into the video
-# sharp. The films are listed in promo-posters.txt, one slug per line.
+# Saves the images promo videos and carousels use to the promo-assets
+# branch, so they can be cut in sharp:
+#   posters/<slug>.jpg     the films in promo-posters.txt, at TMDB's largest
+#                          fixed poster size (w780)
+#   stills/<slug>-<n>.jpg  the films in promo-stills.txt: up to ten frames
+#                          each at w1280, frames without title text first
 #
 # Nothing on the site or in main reads the branch: it holds only the
 # images and is replaced on every run.
 
 on:
   workflow_dispatch:
-  # Runs once whenever the list or the job changes.
+  # Runs once whenever a list or the job changes.
   push:
     branches: [main]
     paths:
       - 'promo-posters.txt'
+      - 'promo-stills.txt'
       - '.github/workflows/promo-posters.yml'
 
 concurrency:
@@ -26,13 +30,14 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Download the posters
+      - name: Download the posters and stills
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
           python3 - <<'PY'
           import json
@@ -40,35 +45,86 @@ jobs:
           import sys
           import urllib.request
 
-          slugs = [l.strip() for l in open('promo-posters.txt') if l.strip() and not l.startswith('#')]
+          UA = {'User-Agent': 'cinnamondb-promo/1 (+https://www.cinnamondb.com)'}
           base = os.environ['SUPABASE_URL'].rstrip('/')
           key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
-          query = base + '/rest/v1/movies?select=slug,poster_url&slug=in.(' + ','.join(slugs) + ')'
-          req = urllib.request.Request(query, headers={'apikey': key, 'Authorization': 'Bearer ' + key})
-          with urllib.request.urlopen(req, timeout=60) as r:
-              found = {row['slug']: row['poster_url'] for row in json.load(r)}
+          SB = {'apikey': key, 'Authorization': 'Bearer ' + key}
+          TM = {'Authorization': 'Bearer ' + os.environ['TMDB_API_KEY'], 'accept': 'application/json'}
 
-          os.makedirs('out/posters', exist_ok=True)
+
+          def slugs_in(path):
+              if not os.path.exists(path):
+                  return []
+              return [l.strip() for l in open(path) if l.strip() and not l.startswith('#')]
+
+
+          def get_json(url, headers):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  return json.load(r)
+
+
+          def download(url, path):
+              req = urllib.request.Request(url, headers=UA)
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  data = r.read()
+              with open(path, 'wb') as f:
+                  f.write(data)
+              return len(data)
+
+
+          def movies(slugs, cols):
+              if not slugs:
+                  return {}
+              rows = get_json(base + '/rest/v1/movies?select=' + cols + '&slug=in.(' + ','.join(slugs) + ')', SB)
+              return {row['slug']: row for row in rows}
+
+
+          saved = 0
           missing = []
-          for slug in slugs:
-              url = found.get(slug)
+
+          # Posters. The stored address is TMDB's w500; w780 is the largest
+          # fixed size, sharp at any size a video draws.
+          poster_slugs = slugs_in('promo-posters.txt')
+          found = movies(poster_slugs, 'slug,poster_url')
+          os.makedirs('out/posters', exist_ok=True)
+          for slug in poster_slugs:
+              url = (found.get(slug) or {}).get('poster_url')
               if not url:
                   missing.append(slug)
                   continue
-              # The stored address is TMDB's w500; w780 is the largest
-              # fixed size, sharp at any size the video draws.
-              big = url.replace('/w500/', '/w780/')
-              req = urllib.request.Request(big, headers={'User-Agent': 'cinnamondb-promo/1 (+https://www.cinnamondb.com)'})
-              with urllib.request.urlopen(req, timeout=60) as r:
-                  data = r.read()
-              with open('out/posters/' + slug + '.jpg', 'wb') as f:
-                  f.write(data)
-              print(slug, len(data), 'bytes')
+              n = download(url.replace('/w500/', '/w780/'), 'out/posters/' + slug + '.jpg')
+              saved += 1
+              print('poster', slug, n, 'bytes')
+
+          # Stills. Frames with no title text on them come first (TMDB
+          # stores those with no language), best voted first; frames with
+          # English text only fill in when a film has too few clean ones.
+          still_slugs = slugs_in('promo-stills.txt')
+          found = movies(still_slugs, 'slug,tmdb_id')
+          os.makedirs('out/stills', exist_ok=True)
+          for slug in still_slugs:
+              tmdb_id = (found.get(slug) or {}).get('tmdb_id')
+              if not tmdb_id:
+                  missing.append(slug)
+                  continue
+              imgs = get_json('https://api.themoviedb.org/3/movie/%d/images?include_image_language=null,en' % tmdb_id, TM)
+              backdrops = imgs.get('backdrops') or []
+              picked = sorted(backdrops, key=lambda b: (b.get('iso_639_1') is not None,
+                                                        -(b.get('vote_average') or 0),
+                                                        -(b.get('vote_count') or 0)))[:10]
+              if not picked:
+                  missing.append(slug)
+                  continue
+              for i, b in enumerate(picked, 1):
+                  n = download('https://image.tmdb.org/t/p/w1280' + b['file_path'], 'out/stills/%s-%d.jpg' % (slug, i))
+                  saved += 1
+                  print('still', slug, i, b.get('iso_639_1'), b.get('vote_average'), n, 'bytes')
 
           if missing:
-              print('::warning::no poster address for ' + ', '.join(missing))
-          if len(missing) == len(slugs):
-              sys.exit('no posters saved')
+              print('::warning::nothing saved for ' + ', '.join(missing))
+          if not saved:
+              sys.exit('no images saved')
           PY
       - name: Save them to the promo-assets branch
         run: |
@@ -76,6 +132,6 @@ jobs:
           git init -q -b promo-assets
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add posters
-          git commit -q -m 'Posters for the promo video'
+          git add .
+          git commit -q -m 'Images for the promo videos and carousels'
           git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" promo-assets
