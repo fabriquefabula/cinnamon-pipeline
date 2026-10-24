@@ -2,19 +2,20 @@
 # optional number of frames after the slug (ten if left out).
 # Saved to the promo-assets branch as stills/<slug>-<n>.jpg by
 # .github/workflows/promo-posters.yml.
-# These classics flopped
-fight-club-1999 15
-the-shawshank-redemption-1994 15
-blade-runner-1982 15
-donnie-darko-2001 15
-the-thing-1982 15
-children-of-men-2006 15
-vertigo-1958 15
-citizen-kane-1941 15
-it-s-a-wonderful-life-1946 15
-the-night-of-the-hunter-1955 15
+# The Cinnamon Hundred, one film from every decade
+the-cabinet-of-dr-caligari-1920 15
+the-great-dictator-1940 15
+rashomon-1950 15
+persona-1966 15
+stalker-1979 15
+cinema-paradiso-1988 15
+chungking-express-1994 15
+city-of-god-2002 15
+the-handmaiden-2016 15
+the-father-2020 15
 # alternates
-once-upon-a-time-in-america-1984 15
-brazil-1985 15
-harold-and-maude-1971 15
-peeping-tom-1960 15
+12-angry-men-1957 15
+8-1-2-1963 15
+come-and-see-1985 15
+in-the-mood-for-love-2000 15
+whiplash-2014 15
