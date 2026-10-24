@@ -2,16 +2,34 @@
 # optional number of frames after the slug (ten if left out).
 # Saved to the promo-assets branch as stills/<slug>-<n>.jpg by
 # .github/workflows/promo-posters.yml.
-# Movies that are secretly about grief
-the-grand-budapest-hotel-2014 20
-children-of-men-2006 20
-vertigo-1958 20
-nomadland-2021 20
-the-great-beauty-2013 20
-inside-llewyn-davis-2013 20
-lars-and-the-real-girl-2007 20
-aftersun-2022 20
-solaris-1972 20
-hiroshima-mon-amour-1959 20
-# alternate
-fireworks-1997 20
+# Every kind of scared
+# Paranoid
+get-out-2017 12
+black-swan-2010 12
+rosemary-s-baby-1968 12
+the-wailing-2016 12
+invasion-of-the-body-snatchers-1978 12
+# Slow dread
+the-shining-1980 12
+the-exorcist-1973 12
+hereditary-2018 12
+the-witch-2016 12
+the-others-2001 12
+# Body horror
+alien-1979 12
+the-substance-2024 12
+the-fly-1986 12
+raw-2017 12
+an-american-werewolf-in-london-1981 12
+# Cosmic
+the-thing-1982 12
+the-mist-2007 12
+the-lighthouse-2019 12
+in-the-mouth-of-madness-1995 12
+possession-1981 12
+# Broad daylight
+jaws-1975 12
+midsommar-2019 12
+the-birds-1963 12
+the-texas-chain-saw-massacre-1974 12
+the-wicker-man-1973 12
