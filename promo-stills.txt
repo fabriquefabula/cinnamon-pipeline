@@ -1,18 +1,9 @@
-# "Comment 3 movies you love" carousel: the five picks
-contact-1997 10
-carol-2015 10
-oldboy-2003 10
-talk-to-me-2023 10
-when-harry-met-sally-1989 10
-# ... and the favourites each pick answers
-interstellar-2014 6
-inception-2010 6
-arrival-2016 6
-la-la-land-2016 6
-call-me-by-your-name-2017 6
-past-lives-2023 6
-joker-2019 6
-american-psycho-2000 6
-midsommar-2019 6
-get-out-2017 6
-emma-2020 6
+# "Movies, explained badly" quiz carousel
+jaws-1975 10
+forrest-gump-1994 10
+mean-girls-2004 10
+the-devil-wears-prada-2006 10
+die-hard-1988 10
+oppenheimer-2023 10
+the-lord-of-the-rings-the-fellowship-of-the-ring-2001 10
+the-wizard-of-oz-1939 10
