@@ -1,19 +1,18 @@
-# Stormy-night carousel: the best similar films for each pick
-memento-2000 8
-twelve-monkeys-1995 8
-the-machinist-2004 8
-reservoir-dogs-1992 8
-the-thing-1982 8
-palm-springs-2020 8
-the-sixth-sense-1999 8
-the-conjuring-2013 8
-the-silence-of-the-lambs-1991 8
-split-2017 8
-dead-poets-society-1989 8
-scent-of-a-woman-1992 8
-good-will-hunting-1997 8
-# ... and The Shining with three similar films, in case it takes the horror slot
-the-shining-1980 15
-the-lighthouse-2019 8
-hereditary-2018 8
-rosemary-s-baby-1968 8
+# "Comment 3 movies you love" carousel: the five picks
+contact-1997 10
+carol-2015 10
+oldboy-2003 10
+talk-to-me-2023 10
+when-harry-met-sally-1989 10
+# ... and the favourites each pick answers
+interstellar-2014 6
+inception-2010 6
+arrival-2016 6
+la-la-land-2016 6
+call-me-by-your-name-2017 6
+past-lives-2023 6
+joker-2019 6
+american-psycho-2000 6
+midsommar-2019 6
+get-out-2017 6
+emma-2020 6
