@@ -2,12 +2,29 @@
 # optional number of frames after the slug (ten if left out).
 # Saved to the promo-assets branch as stills/<slug>-<n>.jpg by
 # .github/workflows/promo-posters.yml.
-# The Cinnamon Hundred (the films not already saved)
-12-angry-men-1957 20
-psycho-1960 20
-the-good-the-bad-and-the-ugly-1966 20
-2001-a-space-odyssey-1968 20
-taxi-driver-1976 20
-# alternates
-goodfellas-1990 15
-one-flew-over-the-cuckoo-s-nest-1975 15
+# Movies for a stormy night in: one film per mood
+shutter-island-2010 15
+the-hateful-eight-2015 15
+groundhog-day-1993 15
+the-others-2001 15
+misery-1990 15
+the-holdovers-2023 15
+# ... and three that feel the same
+prisoners-2013 8
+ex-machina-2015 8
+the-platform-2019 8
+rear-window-1954 8
+wind-river-2017 8
+fargo-1996 8
+about-time-2013 8
+moonrise-kingdom-2012 8
+midnight-in-paris-2011 8
+the-orphanage-2007 8
+rebecca-1940 8
+moon-2009 8
+saw-2004 8
+identity-2003 8
+10-cloverfield-lane-2016 8
+little-women-2019 8
+the-breakfast-club-1985 8
+pride-prejudice-2005 8
