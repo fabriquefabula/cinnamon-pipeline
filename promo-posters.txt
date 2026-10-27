@@ -1,69 +1,49 @@
-# Films whose posters a promo video uses, one slug per line.
+# Films whose posters a promo video or pin uses, one slug per line.
 # Saved to the promo-assets branch by .github/workflows/promo-posters.yml.
-# The Interstellar video
+# Pinterest: If you loved Pride & Prejudice
+pride-prejudice-2005
+emma-2020
+little-women-2019
+sense-and-sensibility-1995
+flipped-2010
+downton-abbey-2019
+# If you loved Little Women
+lady-bird-2017
+coda-2021
+call-me-by-your-name-2017
+# If you loved Interstellar
 interstellar-2014
+arrival-2016
 the-martian-2015
-project-hail-mary-2026
-everything-everywhere-all-at-once-2022
-alien-1979
-m3gan-2022
-life-2017
-the-lord-of-the-rings-the-fellowship-of-the-ring-2001
-harry-potter-and-the-order-of-the-phoenix-2007
-spirited-away-2001
-life-of-pi-2012
-the-da-vinci-code-2006
-the-matrix-resurrections-2021
-les-miserables-2012
-the-prince-of-egypt-1998
-warriors-of-the-wind-1984
-the-city-of-lost-children-1995
-# The Pepe Silvia video
-shrek-2001
-titanic-1997
-the-dark-knight-2008
-barbie-2023
-oppenheimer-2023
-inception-2010
-pulp-fiction-1994
-the-godfather-1972
-jurassic-park-1993
-star-wars-1977
-toy-story-1995
-mamma-mia-2008
-paddington-2-2017
-the-shawshank-redemption-1994
-dune-2021
-parasite-2019
-get-out-2017
+contact-1997
+gattaca-1997
+silent-running-1972
+# If you loved Hereditary
+hereditary-2018
+midsommar-2019
+the-babadook-2014
+the-witch-2016
+the-wailing-2016
+smile-2-2024
+# If you loved When Harry Met Sally
+when-harry-met-sally-1989
+sleepless-in-seattle-1993
+10-things-i-hate-about-you-1999
+the-american-president-1995
+frankie-and-johnny-1991
+# If you loved La La Land
 la-la-land-2016
-gravity-2013
-back-to-the-future-1985
-mean-girls-2004
-the-notebook-2004
-twilight-2008
-frozen-2013
-avatar-2009
-fight-club-1999
-the-lion-king-1994
-finding-nemo-2003
-home-alone-1990
-the-matrix-1999
-forrest-gump-1994
-# Halloween movies for people who hate horror
-hocus-pocus-1993
-the-addams-family-1991
-the-nightmare-before-christmas-1993
-young-frankenstein-1974
-monsters-inc-2001
-corpse-bride-2005
-hotel-transylvania-2012
-what-we-do-in-the-shadows-2014
-coraline-2009
-# alternates
-frankenweenie-2012
-edward-scissorhands-1990
-kiki-s-delivery-service-1989
-coco-2017
-ghostbusters-1984
-beetlejuice-1988
+500-days-of-summer-2009
+silver-linings-playbook-2012
+wicked-2024
+cafe-society-2016
+miss-pettigrew-lives-for-a-day-2008
+# Creepy documentaries
+three-identical-strangers-2018
+the-imposter-2012
+catfish-2010
+haxan-1922
+tickled-2016
+the-thin-blue-line-1988
+unknown-number-the-high-school-catfish-2025
+lover-stalker-killer-2024
