@@ -4,7 +4,7 @@ name: Promo Posters
 # branch, so they can be cut in sharp:
 #   posters/<slug>.jpg     the films in promo-posters.txt, at TMDB's largest
 #                          fixed poster size (w780)
-#   stills/<slug>-<n>.jpg  the films in promo-stills.txt: up to ten frames
+#   stills/<slug>-<n>.jpg  the films or series in promo-stills.txt: up to ten frames
 #                          each (or the number after the slug) at w1280,
 #                          frames without title text first
 #
@@ -78,10 +78,10 @@ jobs:
               return len(data)
 
 
-          def movies(slugs, cols):
+          def movies(slugs, cols, table='movies'):
               if not slugs:
                   return {}
-              rows = get_json(base + '/rest/v1/movies?select=' + cols + '&slug=in.(' + ','.join(slugs) + ')', SB)
+              rows = get_json(base + '/rest/v1/' + table + '?select=' + cols + '&slug=in.(' + ','.join(slugs) + ')', SB)
               return {row['slug']: row for row in rows}
 
 
@@ -108,14 +108,18 @@ jobs:
           still_lines = lines_in('promo-stills.txt')
           still_slugs = [parts[0] for parts in still_lines]
           wanted = {parts[0]: int(parts[1]) if len(parts) > 1 else 10 for parts in still_lines}
+          # A slug is looked up among films first, then among series, and
+          # the frames come from TMDB's film or TV images to match.
           found = movies(still_slugs, 'slug,tmdb_id')
+          found_tv = movies([s for s in still_slugs if s not in found], 'slug,tmdb_id', 'tv_shows')
           os.makedirs('out/stills', exist_ok=True)
           for slug in still_slugs:
-              tmdb_id = (found.get(slug) or {}).get('tmdb_id')
+              kind = 'movie' if slug in found else 'tv'
+              tmdb_id = ((found if kind == 'movie' else found_tv).get(slug) or {}).get('tmdb_id')
               if not tmdb_id:
                   missing.append(slug)
                   continue
-              imgs = get_json('https://api.themoviedb.org/3/movie/%d/images?include_image_language=null,en' % tmdb_id, TM)
+              imgs = get_json('https://api.themoviedb.org/3/%s/%d/images?include_image_language=null,en' % (kind, tmdb_id), TM)
               backdrops = imgs.get('backdrops') or []
               picked = sorted(backdrops, key=lambda b: (b.get('iso_639_1') is not None,
                                                         -(b.get('vote_average') or 0),
