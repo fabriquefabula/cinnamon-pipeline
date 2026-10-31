@@ -27,12 +27,23 @@ name: Submit to IndexNow
 #      live sitemap rather than listed here, so a shelf added with an
 #      INSERT is submitted the next morning with no change to this file.
 #
-#   2. A rotating slice of the like-pages. All 18,488 of them at once
-#      from a domain with no history reads as exactly what it looks
-#      like, so 2,000 a day go out in a deterministic rotation that
-#      covers the whole set in about ten days and then starts again.
-#      The offset is derived from the day of the year, so a re-run on
-#      the same day repeats the same slice rather than skipping ahead.
+#   2. A rotating slice of the old addresses: /movie/<uuid>, /tv/<uuid>
+#      and /person/<uuid>, the sitemap files with ids 600-699. Every one
+#      of them has answered a real 308 to its slug since 31 October 2026;
+#      before that the redirect was made inside a static page and a
+#      crawler was handed a 200. A redirect is one of the changes
+#      IndexNow exists to report, and these are the addresses the
+#      engines already hold, so this is how they learn where each page
+#      lives now. ROTATING_SLICE a day, counted from 31 October: films
+#      first, then series, then people, the whole set in about three
+#      weeks, then round again until the site stops listing these files
+#      (31 January 2027). A re-run on the same day repeats the same
+#      slice rather than skipping ahead.
+#
+#      This slot used to rotate through the like-pages (ids 400-599).
+#      Those carry noindex and left the sitemap on 31 October 2026, and
+#      submitting a page that asks not to be indexed only spends the
+#      engines' attention on nothing.
 
 on:
   schedule:
@@ -56,7 +67,7 @@ jobs:
           import time
           import urllib.error
           import urllib.request
-          from datetime import datetime, timezone
+          from datetime import date, datetime, timezone
 
           HOST = "www.cinnamondb.com"
           BASE = "https://" + HOST
@@ -81,8 +92,13 @@ jobs:
           ROUNDS = 3
           BACKOFF = 45
 
-          # IndexNow caps a single submission at 10,000 URLs.
-          LIKE_SLICE = 2000
+          # IndexNow caps a single submission at 10,000 URLs. The core set
+          # is about 500, so 9,000 old addresses fit beside it in one post.
+          ROTATING_SLICE = 9000
+          # Day 0 of the rotation: the day the old addresses began
+          # answering a real 308. Counting from here rather than from the
+          # day of the year puts the films and series in the first week.
+          ROTATION_START = date(2026, 10, 31)
           # Sitemap 0 carries roughly 500 URLs. A collapse to double
           # digits means a table read came back empty, which otherwise
           # looks exactly like a healthy run.
@@ -150,43 +166,46 @@ jobs:
               fail("sitemap 0 held only %d URLs, expected at least %d" % (len(core), CORE_FLOOR))
           print("Core set: %d URLs." % len(core))
 
-          # -- Rotating set: the like-pages ------------------------------
-          # ids 400-499 are /movies-like, 500-599 are /shows-like. Matched
-          # on the path segment rather than the range arithmetic so a
-          # renumbering fails loudly here instead of silently submitting
-          # the wrong bucket.
-          like_children = []
+          # -- Rotating set: the old addresses ---------------------------
+          # ids 600-607 are films, 640-647 series, 660-675 people. Matched
+          # on the file's own number rather than on its position in the
+          # index, and read in numeric order, so the films come first
+          # whatever order the index lists them in.
+          old_children = []
           for c in children:
               tail = c.rstrip("/").rsplit("/", 1)[-1]
               num = tail[:-4] if tail.endswith(".xml") else ""
-              if num.isdigit() and 400 <= int(num) < 600:
-                  like_children.append(c)
+              if num.isdigit() and 600 <= int(num) < 700:
+                  old_children.append((int(num), c))
 
-          like = []
-          for c in sorted(like_children):
+          old = []
+          old_seen = set()
+          for _, c in sorted(old_children):
               try:
                   _, _, xml = get(c)
               except Exception as e:  # noqa: BLE001
                   print("::warning::could not read %s: %s" % (c, e))
                   continue
-              like.extend(locs(xml))
+              for u in locs(xml):
+                  if u not in old_seen:
+                      old_seen.add(u)
+                      old.append(u)
 
-          like = sorted(set(like))
           rotating = []
-          if like:
-              day = datetime.now(timezone.utc).timetuple().tm_yday
-              start = (day * LIKE_SLICE) % len(like)
+          if old:
+              day = max((datetime.now(timezone.utc).date() - ROTATION_START).days, 0)
+              start = (day * ROTATING_SLICE) % len(old)
               # Wraps, so the final slice of a cycle is full rather than
-              # a short tail that leaves the last few hundred pages
+              # a short tail that leaves the last few thousand addresses
               # submitted less often than the rest.
-              doubled = like + like
-              rotating = doubled[start : start + LIKE_SLICE]
+              doubled = old + old
+              rotating = doubled[start : start + ROTATING_SLICE]
               print(
-                  "Rotating set: %d of %d like-pages, offset %d (day %d)."
-                  % (len(rotating), len(like), start, day)
+                  "Rotating set: %d of %d old addresses from %d files, offset %d (day %d)."
+                  % (len(rotating), len(old), len(old_children), start, day)
               )
           else:
-              print("::warning::no like-page sitemaps found -- submitting the core set only")
+              print("::warning::no old-address sitemaps found -- submitting the core set only")
 
           # -- Submit ----------------------------------------------------
           seen = set()
