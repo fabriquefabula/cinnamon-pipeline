@@ -25,3 +25,7 @@ the-odyssey-2026 20
 digger-2026 20
 the-debut-2026 20
 wildwood-2026 20
+# The Oscar forecast, every category: carousel
+all-of-a-sudden-2026 20
+obsession-2026 20
+naza-2026 20
