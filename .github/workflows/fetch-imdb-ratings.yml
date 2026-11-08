@@ -1,0 +1,24 @@
+name: Fetch IMDb Ratings
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 03:45 UTC, so the 04:15 nightly score refresh picks
+    # the new ratings up the same morning. IMDb updates the file daily,
+    # but a series' rating barely moves in a week.
+    - cron: '45 3 * * 1'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run fetch-imdb-ratings
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
