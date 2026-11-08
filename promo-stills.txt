@@ -14,3 +14,10 @@ the-talented-mr-ripley-1999 20
 the-hunt-2012 20
 requiem-for-a-dream-2000 20
 the-fly-1986 20
+# Best Picture, by the data: carousel
+project-hail-mary-2026 20
+you-can-see-everything-2026 20
+la-bola-negra-2026 20
+the-invite-2026 20
+wild-horse-nine-2026 20
+the-odyssey-2026 20
