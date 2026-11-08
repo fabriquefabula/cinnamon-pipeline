@@ -3,10 +3,12 @@ name: Fetch Critic Scores
 on:
   workflow_dispatch:
   schedule:
-    # Weekly, Monday 05:30 UTC. Critics' scores settle within weeks of a
-    # release and barely move after, so once a week picks up new films
-    # without asking Wikidata's query service the same questions daily.
-    - cron: '30 5 * * 1'
+    # Weekly, Monday 03:00 UTC, so the 04:15 nightly score refresh picks
+    # the new scores up the same morning. Critics' scores settle within
+    # weeks of a release and barely move after, so once a week picks up new
+    # films and seasons without asking Wikidata's query service the same
+    # questions daily.
+    - cron: '0 3 * * 1'
 
 jobs:
   fetch:
