@@ -33,7 +33,8 @@
     "refresh-availability": "tsx refresh-availability.ts",
     "pipeline-health": "tsx pipeline-health.ts",
     "send-release-alerts": "tsx send-release-alerts.ts",
-    "layout-mood-map": "tsx layout-mood-map.ts"
+    "layout-mood-map": "tsx layout-mood-map.ts",
+    "fetch-critic-scores": "tsx fetch-critic-scores.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

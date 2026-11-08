@@ -1,0 +1,24 @@
+name: Fetch Critic Scores
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 05:30 UTC. Critics' scores settle within weeks of a
+    # release and barely move after, so once a week picks up new films
+    # without asking Wikidata's query service the same questions daily.
+    - cron: '30 5 * * 1'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run fetch-critic-scores
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
