@@ -5,12 +5,12 @@ something-very-bad-is-going-to-happen-2026 12
 if-wishes-could-kill-2026 12
 the-beauty-2026 12
 widow-s-bay-2026 12
-# They start sunny: carousel and video
-the-notebook-2004 20
-call-me-by-your-name-2017 20
+# They start sunny: carousel
 parasite-2019 20
-aftersun-2022 20
-a-star-is-born-2018 20
+saltburn-2023 20
+mulholland-drive-2001 20
 the-banshees-of-inisherin-2022 20
-blue-valentine-2010 20
+the-talented-mr-ripley-1999 20
+the-hunt-2012 20
 requiem-for-a-dream-2000 20
+the-fly-1986 20
