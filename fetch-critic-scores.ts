@@ -4,8 +4,8 @@
 // TMDB user rating, and TMDB's users rate like fans: Avengers: Infinity War
 // (8.2) and Sound of Freedom (8.0) outrated The Lighthouse (7.5), and the
 // Cinnamon Hundred filled up with crowd favourites. The television Hundred
-// had the same problem: Ghost Whisperer and Gossip Girl in, Breaking Bad
-// and The Wire out. Critics are the other half of "is it brilliant", and
+// had the same problem, with Ghost Whisperer, Gossip Girl and Redo of
+// Healer in it. Critics are the other half of "is it brilliant", and
 // Wikidata carries their scores openly (CC0): Metacritic's Metascore, and
 // Rotten Tomatoes' Tomatometer and critics' average rating, as
 // review-score statements (P444) qualified by who gave them (P447).
@@ -47,6 +47,12 @@ const TV_BATCH = 50;
 // The query service asks clients to go gently: one query at a time, with
 // a pause between.
 const PAUSE_MS = 1000;
+// The series pass gives up at this point and writes what it has, so the
+// film pass always gets its turn inside the job's time limit.
+const TV_TIME_LIMIT_MS = 20 * 60 * 1000;
+// The service stops a query at 60 seconds; this leaves room for one more
+// try, and stops a request that never answers from holding up the run.
+const ASK_TIMEOUT_MS = 130 * 1000;
 const UPSERT_BATCH = 500;
 const PAGE = 1000;
 
@@ -229,22 +235,43 @@ export function sparql(imdbIds: string[]): string {
 }`;
 }
 
-export function sparqlTv(imdbIds: string[]): string {
+// Two questions per batch, each anchored on the series the way the film
+// query is: its own review scores, then its seasons'. Asked as one query
+// with a UNION, the first series pass had not written anything after half
+// an hour: with the series' statements inside the UNION, the query service
+// is free to gather every Metacritic and Rotten Tomatoes statement on
+// Wikidata before it knows which series it wants. The written order is
+// kept (hint:optimizer "None") so each question starts from the IMDb ids.
+export function sparqlTvSeries(imdbIds: string[]): string {
   const values = imdbIds.map((id) => `"${id}"`).join(' ');
   return `SELECT ?imdb ?item ?part ?st ?value ?by ?methodLabel ?date WHERE {
+  hint:Query hint:optimizer "None" .
   VALUES ?imdb { ${values} }
-  VALUES ?by { wd:${METACRITIC} wd:${ROTTEN_TOMATOES} }
   ?item wdt:P345 ?imdb .
-  {
-    ?item p:P444 ?st .
-    OPTIONAL { ?st pq:P4908|pq:P518 ?part . }
-  } UNION {
-    ?part wdt:P179 ?item ;
-          wdt:P31 wd:${SEASON} ;
-          p:P444 ?st .
-  }
+  ?item p:P444 ?st .
+  ?st pq:P447 ?by .
+  FILTER(?by IN (wd:${METACRITIC}, wd:${ROTTEN_TOMATOES}))
   ?st ps:P444 ?value ;
-      pq:P447 ?by ;
+      wikibase:rank ?rank .
+  FILTER(?rank != wikibase:DeprecatedRank)
+  OPTIONAL { ?st pq:P4908|pq:P518 ?part . }
+  OPTIONAL { ?st pq:P459 ?method . ?method rdfs:label ?methodLabel . FILTER(LANG(?methodLabel) = "en") }
+  OPTIONAL { ?st pq:P585 ?date . }
+}`;
+}
+
+export function sparqlTvSeasons(imdbIds: string[]): string {
+  const values = imdbIds.map((id) => `"${id}"`).join(' ');
+  return `SELECT ?imdb ?item ?part ?st ?value ?by ?methodLabel ?date WHERE {
+  hint:Query hint:optimizer "None" .
+  VALUES ?imdb { ${values} }
+  ?item wdt:P345 ?imdb .
+  ?part wdt:P179 ?item .
+  ?part wdt:P31 wd:${SEASON} .
+  ?part p:P444 ?st .
+  ?st pq:P447 ?by .
+  FILTER(?by IN (wd:${METACRITIC}, wd:${ROTTEN_TOMATOES}))
+  ?st ps:P444 ?value ;
       wikibase:rank ?rank .
   FILTER(?rank != wikibase:DeprecatedRank)
   OPTIONAL { ?st pq:P459 ?method . ?method rdfs:label ?methodLabel . FILTER(LANG(?methodLabel) = "en") }
@@ -298,6 +325,7 @@ async function ask<B>(wikidataFetch: typeof fetch, query: string): Promise<B[]> 
   const url = `${ENDPOINT}?format=json&query=${encodeURIComponent(query)}`;
   const res = await wikidataFetch(url, {
     headers: { Accept: 'application/sparql-results+json', 'User-Agent': USER_AGENT },
+    signal: AbortSignal.timeout(ASK_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`answered ${res.status}`);
   const json = (await res.json()) as { results?: { bindings?: B[] } };
@@ -327,10 +355,20 @@ async function seriesPass(supabase: SupabaseClient, wikidataFetch: typeof fetch)
 
   const found = new Map<string, TvFound>();
   let failedBatches = 0;
+  const deadline = Date.now() + TV_TIME_LIMIT_MS;
   for (let i = 0; i < imdbIds.length; i += TV_BATCH) {
+    if (Date.now() > deadline) {
+      const left = Math.ceil((imdbIds.length - i) / TV_BATCH);
+      failedBatches += left;
+      console.error(`Series pass stopped at its time limit with ${left} queries not asked.`);
+      break;
+    }
     try {
-      const bindings = await ask<TvBinding>(wikidataFetch, sparqlTv(imdbIds.slice(i, i + TV_BATCH)));
-      for (const [imdb, f] of parseTv(bindings)) found.set(imdb, f);
+      const batch = imdbIds.slice(i, i + TV_BATCH);
+      const series = await ask<TvBinding>(wikidataFetch, sparqlTvSeries(batch));
+      await sleep(PAUSE_MS);
+      const seasons = await ask<TvBinding>(wikidataFetch, sparqlTvSeasons(batch));
+      for (const [imdb, f] of parseTv([...series, ...seasons])) found.set(imdb, f);
     } catch (err) {
       failedBatches++;
       console.error(`Series batch at ${i} failed: ${(err as Error).message}`);
@@ -427,15 +465,22 @@ async function main() {
     global: { fetch: resilientFetch({ label: 'database', retryOn: GATEWAY_STATUSES }) },
   });
   // A query is a read, so it is sent again on a dropped connection, a rate
-  // limit or a 5xx (see resilient-fetch.ts).
-  const wikidataFetch = resilientFetch({ label: 'Wikidata', retryOn: API_STATUSES, attempts: 5 });
+  // limit or a 5xx (see resilient-fetch.ts). A series query that ran out of
+  // time on the service's side will run out again, so it gets three tries
+  // rather than five.
+  const filmFetch = resilientFetch({ label: 'Wikidata', retryOn: API_STATUSES, attempts: 5 });
+  const seriesFetch = resilientFetch({ label: 'Wikidata', retryOn: API_STATUSES, attempts: 3 });
 
   const startedAt = new Date().toISOString();
   const passes: PassResult[] = [];
   let broken = false;
-  for (const [name, pass] of [['Series', seriesPass], ['Films', filmPass]] as const) {
+  const runs: [string, () => Promise<PassResult>][] = [
+    ['Series', () => seriesPass(supabase, seriesFetch)],
+    ['Films', () => filmPass(supabase, filmFetch)],
+  ];
+  for (const [name, run] of runs) {
     try {
-      const r = await pass(supabase, wikidataFetch);
+      const r = await run();
       passes.push(r);
       console.log(`${name}: ${r.written} written, ${r.failedRows} failed, ${r.failedBatches} of ${r.batches} queries failed.\n`);
       if (r.batches > 0 && r.failedBatches === r.batches) broken = true;
