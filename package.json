@@ -35,7 +35,8 @@
     "send-release-alerts": "tsx send-release-alerts.ts",
     "layout-mood-map": "tsx layout-mood-map.ts",
     "fetch-critic-scores": "tsx fetch-critic-scores.ts",
-    "fetch-imdb-ratings": "tsx fetch-imdb-ratings.ts"
+    "fetch-imdb-ratings": "tsx fetch-imdb-ratings.ts",
+    "fetch-tv-awards": "tsx fetch-tv-awards.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

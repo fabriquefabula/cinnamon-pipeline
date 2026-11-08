@@ -1,0 +1,23 @@
+name: Fetch TV Awards
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 03:30 UTC, so the 04:15 nightly score refresh picks
+    # new awards up the same morning.
+    - cron: '30 3 * * 1'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm run fetch-tv-awards
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
