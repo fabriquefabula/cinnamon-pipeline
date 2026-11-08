@@ -21,3 +21,7 @@ la-bola-negra-2026 20
 the-invite-2026 20
 wild-horse-nine-2026 20
 the-odyssey-2026 20
+# The other Oscar races, by the data: carousel
+digger-2026 20
+the-debut-2026 20
+wildwood-2026 20
