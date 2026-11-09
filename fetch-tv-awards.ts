@@ -14,14 +14,16 @@
 //
 // Each table row or list entry that links to a series counts once for it:
 // as a win when the row is marked as the winner (the gold row, or bold
-// type), as a nomination otherwise. Every Peabody entry is a win.
+// type), as a nomination otherwise. Every Peabody and TCA entry is a win:
+// those pages list the winners alone.
 // Sections that recount the same awards (most wins, by network) and the
 // reference lists are skipped. Links are resolved to Wikidata items, items
 // to IMDb ids -- a season or an episode to its series -- and IMDb ids to
 // the catalogue.
 //
 // Upserts tv_awards for every scored series with an IMDb id: a series with
-// no major awards gets a row of zeros. Rows this run did not write are then
+// no major awards gets a row of zeros, and detail holds the wins and
+// nominations per awarding body. Rows this run did not write are then
 // removed. What each page yielded is logged in pipeline_runs.error_message.
 //
 // Required env vars: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
@@ -47,7 +49,7 @@ const MIN_MATCHED_ROWS = 200;
 
 export interface AwardPage {
   title: string;
-  /** Every entry on the page is an honouree (the Peabodys). */
+  /** Every entry on the page is an honouree (the Peabodys, the TCA awards). */
   allWins?: boolean;
 }
 
@@ -74,12 +76,28 @@ export const FIXED_PAGES: AwardPage[] = [
   { title: "Critics' Choice Television Award for Best Limited Series" },
   { title: "Critics' Choice Television Award for Best Movie/Miniseries" },
   { title: "Critics' Choice Television Award for Best Foreign Language Series" },
-  { title: 'TCA Award for Program of the Year' },
-  { title: 'TCA Award for Outstanding Achievement in Drama' },
-  { title: 'TCA Award for Outstanding Achievement in Comedy' },
-  { title: 'TCA Award for Outstanding Achievement in Movies, Miniseries and Specials' },
-  { title: 'TCA Award for Outstanding New Program' },
+  { title: 'TCA Award for Program of the Year', allWins: true },
+  { title: 'TCA Award for Outstanding Achievement in Drama', allWins: true },
+  { title: 'TCA Award for Outstanding Achievement in Comedy', allWins: true },
+  { title: 'TCA Award for Outstanding Achievement in Movies, Miniseries and Specials', allWins: true },
+  { title: 'TCA Award for Outstanding New Program', allWins: true },
 ];
+
+// The body behind each page, for the per-body detail.
+const BODIES: [RegExp, string][] = [
+  [/^Primetime Emmy/, 'emmy'],
+  [/^International Emmy/, 'intl_emmy'],
+  [/^Golden Globe/, 'globe'],
+  [/^British Academy Television/, 'bafta'],
+  [/^Critics' Choice/, 'critics_choice'],
+  [/^TCA Award/, 'tca'],
+  [/Peabody/, 'peabody'],
+];
+
+export function bodyOf(page: string): string {
+  for (const [re, body] of BODIES) if (re.test(page)) return body;
+  return 'other';
+}
 
 // Pages found by their title's start, one per decade.
 export const PAGE_PREFIXES: { prefix: string; allWins: boolean }[] = [
@@ -248,6 +266,8 @@ export function parseAwardPage(wikitext: string, allWins = false): AwardRow[] {
 export interface Tally {
   wins: number;
   nominations: number;
+  /** Per awarding body: wins and nominations. */
+  detail: Record<string, { w: number; n: number }>;
 }
 
 export interface ParsedPage {
@@ -280,10 +300,17 @@ export function tallyPages(
         for (const tt of imdbOf.get(item) ?? []) for (const id of byImdb.get(tt) ?? []) ids.add(id);
       }
       if (ids.size > 0) matched++;
+      const body = bodyOf(p.page);
       for (const id of ids) {
-        const t = tallies.get(id) ?? { wins: 0, nominations: 0 };
-        if (row.won) t.wins++;
-        else t.nominations++;
+        const t = tallies.get(id) ?? { wins: 0, nominations: 0, detail: {} };
+        const d = (t.detail[body] ??= { w: 0, n: 0 });
+        if (row.won) {
+          t.wins++;
+          d.w++;
+        } else {
+          t.nominations++;
+          d.n++;
+        }
         tallies.set(id, t);
       }
     }
@@ -552,8 +579,15 @@ async function main() {
 
   const stamp = new Date().toISOString();
   const rows = series.map((s) => {
-    const t = tallies.get(s.id) ?? { wins: 0, nominations: 0 };
-    return { tv_id: s.id, imdb_id: s.imdb, wins: t.wins, nominations: t.nominations, fetched_at: stamp };
+    const t = tallies.get(s.id) ?? { wins: 0, nominations: 0, detail: {} };
+    return {
+      tv_id: s.id,
+      imdb_id: s.imdb,
+      wins: t.wins,
+      nominations: t.nominations,
+      detail: t.detail,
+      fetched_at: stamp,
+    };
   });
 
   let written = 0;
