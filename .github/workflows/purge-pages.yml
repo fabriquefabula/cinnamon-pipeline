@@ -1,0 +1,48 @@
+name: Purge Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'purge-paths.txt'
+      - '.github/workflows/purge-pages.yml'
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Most of the site's content lives in Postgres: a scoring change or a
+      # fixed row changes what a page should say without a deploy, and the
+      # cached page is served for up to a day (series pages and shelves
+      # revalidate every 86400 s). Committing the pages to purge to
+      # purge-paths.txt sends them to cinnamon-web/app/api/revalidate, 80
+      # at a time (its limit), with the same REVALIDATE_SECRET as
+      # refresh-homepage.yml.
+      - uses: actions/checkout@v4
+      - name: Purge the listed pages
+        run: |
+          grep -v -E '^[[:space:]]*(#|$)' purge-paths.txt | sed 's/[[:space:]]*$//' > /tmp/paths || true
+          total=$(wc -l < /tmp/paths)
+          if [ "$total" -eq 0 ]; then
+            echo "Nothing to purge."
+            exit 0
+          fi
+          echo "Purging $total pages."
+          split -l 80 /tmp/paths /tmp/batch.
+          for f in /tmp/batch.*; do
+            body=$(jq -R -s -c 'split("\n") | map(select(length > 0)) | {paths: .}' "$f")
+            status=$(curl -sS -L --max-time 30 -o /tmp/body -w '%{http_code}' \
+              -X POST \
+              -H "x-revalidate-secret: ${{ secrets.REVALIDATE_SECRET }}" \
+              -H 'Content-Type: application/json' \
+              --data "$body" \
+              https://cinnamondb.com/api/revalidate)
+            cat /tmp/body
+            echo
+            if [ "$status" != "200" ]; then
+              echo "Revalidate returned HTTP $status"
+              exit 1
+            fi
+          done
