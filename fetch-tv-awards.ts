@@ -14,8 +14,9 @@
 //
 // Each table row or list entry that links to a series counts once for it:
 // as a win when the row is marked as the winner (the gold row, or bold
-// type), as a nomination otherwise. Every Peabody and TCA entry is a win:
-// those pages list the winners alone.
+// type), as a nomination otherwise. A table laid out a year to a row, with
+// a Winner column and a Nominees column (the TCA awards), is read by
+// column. Every Peabody entry is a win: those pages list the winners alone.
 // Sections that recount the same awards (most wins, by network) and the
 // reference lists are skipped. Links are resolved to Wikidata items, items
 // to IMDb ids -- a season or an episode to its series -- and IMDb ids to
@@ -49,7 +50,7 @@ const MIN_MATCHED_ROWS = 200;
 
 export interface AwardPage {
   title: string;
-  /** Every entry on the page is an honouree (the Peabodys, the TCA awards). */
+  /** Every entry on the page is an honouree (the Peabodys). */
   allWins?: boolean;
 }
 
@@ -76,11 +77,11 @@ export const FIXED_PAGES: AwardPage[] = [
   { title: "Critics' Choice Television Award for Best Limited Series" },
   { title: "Critics' Choice Television Award for Best Movie/Miniseries" },
   { title: "Critics' Choice Television Award for Best Foreign Language Series" },
-  { title: 'TCA Award for Program of the Year', allWins: true },
-  { title: 'TCA Award for Outstanding Achievement in Drama', allWins: true },
-  { title: 'TCA Award for Outstanding Achievement in Comedy', allWins: true },
-  { title: 'TCA Award for Outstanding Achievement in Movies, Miniseries and Specials', allWins: true },
-  { title: 'TCA Award for Outstanding New Program', allWins: true },
+  { title: 'TCA Award for Program of the Year' },
+  { title: 'TCA Award for Outstanding Achievement in Drama' },
+  { title: 'TCA Award for Outstanding Achievement in Comedy' },
+  { title: 'TCA Award for Outstanding Achievement in Movies, Miniseries and Specials' },
+  { title: 'TCA Award for Outstanding New Program' },
 ];
 
 // The body behind each page, for the per-body detail.
@@ -156,11 +157,77 @@ export function linkTargets(text: string): string[] {
   return [...out];
 }
 
-// Which rows of one table (or one run of list entries) won. The marks are
-// trusted in order: the gold row or dagger; bold type, unless nearly every
-// row is bold and it marks nothing; and failing both, the first row of each
-// year, which carries the year's rowspan and is the winner by convention.
+// A cell's attributes ("style=... | content") are not its content; the
+// pipes inside a link are.
+function stripAttributes(cell: string): string {
+  const m = /^([^[\]{}|]*=[^[\]{}|]*)\|(?!\|)([\s\S]*)$/.exec(cell);
+  return (m ? m[2] : cell).trim();
+}
+
+/**
+ * The cells of one table row, in order: "a || b" on one line or a cell to a
+ * line, with lines that start with neither | nor ! (list entries, run-on
+ * text) belonging to the cell before them.
+ */
+export function rowCells(rowText: string): string[] {
+  const cells: string[] = [];
+  for (const line of rowText.split('\n')) {
+    if (line.startsWith('|-') || line.startsWith('|+') || line.startsWith('|}')) continue;
+    if (line.startsWith('|') || line.startsWith('!')) {
+      const sep = line.startsWith('!') ? /\s*(?:!!|\|\|)\s*/ : /\s*\|\|\s*/;
+      for (const part of line.slice(1).split(sep)) cells.push(stripAttributes(part));
+    } else if (cells.length > 0) {
+      cells[cells.length - 1] += '\n' + line;
+    }
+  }
+  return cells;
+}
+
+const WINNER_COLUMN = /\bwinners?\b|\brecipients?\b/i;
+const NOMINEE_COLUMN = /nominee/i;
+
+// A header row: every line a ! cell.
+function headerCells(rowText: string): string[] | null {
+  const lines = rowText.split('\n').filter((l) => !l.startsWith('|-'));
+  if (lines.length === 0 || !lines.every((l) => l.startsWith('!'))) return null;
+  return rowCells(rowText);
+}
+
+// A table with a Winner column and a Nominees column, a year to a row: the
+// links in the one are wins, in the other nominations. A row under a
+// rowspan has fewer cells; they line up from the right. Null when the
+// table is not laid out that way.
+function judgeByColumn(group: string[]): AwardRow[] | null {
+  const at = group.findIndex((t) => headerCells(t) !== null);
+  if (at < 0) return null;
+  const header = headerCells(group[at])!;
+  const w = header.findIndex((h) => WINNER_COLUMN.test(h) && !NOMINEE_COLUMN.test(h));
+  const n = header.findIndex((h) => NOMINEE_COLUMN.test(h));
+  if (w < 0 || n < 0) return null;
+  const out: AwardRow[] = [];
+  for (const t of group.slice(at + 1)) {
+    const cells = rowCells(t);
+    const shift = header.length - cells.length;
+    const cell = (col: number) => (col - shift >= 0 ? cells[col - shift] : undefined);
+    const winners = linkTargets(cell(w) ?? '');
+    const nominees = linkTargets(cell(n) ?? '').filter((x) => !winners.includes(x));
+    if (winners.length > 0) out.push({ targets: winners, won: true });
+    if (nominees.length > 0) out.push({ targets: nominees, won: false });
+  }
+  return out;
+}
+
+// Which rows of one table (or one run of list entries) won. A table with
+// a Winner and a Nominees column is read by column. Otherwise the marks
+// are trusted in order: the gold row or dagger; bold type, unless nearly
+// every row is bold and it marks nothing; and failing both, the first row
+// of each year, which carries the year's rowspan and is the winner by
+// convention.
 function judge(group: string[], allWins: boolean): AwardRow[] {
+  if (!allWins) {
+    const byColumn = judgeByColumn(group);
+    if (byColumn) return byColumn;
+  }
   const rows = group.map((t) => ({ t, targets: linkTargets(t) })).filter((r) => r.targets.length > 0);
   if (rows.length === 0) return [];
   if (allWins) return rows.map((r) => ({ targets: r.targets, won: true }));
