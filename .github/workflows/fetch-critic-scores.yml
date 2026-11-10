@@ -3,17 +3,20 @@ name: Fetch Critic Scores
 on:
   workflow_dispatch:
   schedule:
-    # Weekly, Monday 03:00 UTC, so the 04:15 nightly score refresh picks
-    # the new scores up the same morning. Critics' scores settle within
-    # weeks of a release and barely move after, so once a week picks up new
-    # films and seasons without asking Wikidata's query service the same
-    # questions daily.
-    - cron: '0 3 * * 1'
+    # Weekly, Monday 01:30 UTC, so the run is over before the 04:15 nightly
+    # score refresh and the new scores are in by morning. Critics' scores
+    # settle within weeks of a release and barely move after, so once a
+    # week picks up new films and seasons without asking Wikidata's query
+    # service the same questions daily.
+    - cron: '30 1 * * 1'
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Every scored film is looked up (about 50,000), and the ones Wikidata
+    # has nothing on are read from Wikipedia: about an hour, with room. The
+    # series pass stops itself at 20 minutes and the Wikipedia pass at 55.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
