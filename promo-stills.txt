@@ -29,13 +29,23 @@ wildwood-2026 20
 all-of-a-sudden-2026 20
 obsession-2026 20
 naza-2026 20
-# "Like it, but…" carousel
-the-artist-2011 8
-let-the-right-one-in-2008 8
-blade-runner-2049-2017 8
-incendies-2010 8
-eyes-wide-shut-1999 8
-the-handmaiden-2016 8
-atonement-2007 8
-catch-me-if-you-can-2002 8
-almost-famous-2000 8
+# "Like it, but…" carousel: the films it lands on
+the-artist-2011 20
+let-the-right-one-in-2008 20
+blade-runner-2049-2017 20
+incendies-2010 20
+eyes-wide-shut-1999 20
+the-handmaiden-2016 20
+atonement-2007 20
+catch-me-if-you-can-2002 20
+almost-famous-2000 20
+# "Like it, but…" Pinterest pins: the films they start from
+la-la-land-2016 12
+the-notebook-2004 12
+inception-2010 12
+fight-club-1999 12
+hereditary-2018 12
+marriage-story-2019 12
+pride-prejudice-2005 12
+oppenheimer-2023 12
+whiplash-2014 12
