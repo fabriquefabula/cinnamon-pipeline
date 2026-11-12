@@ -49,3 +49,19 @@ marriage-story-2019 12
 pride-prejudice-2005 12
 oppenheimer-2023 12
 whiplash-2014 12
+# "The film you love, but…" posters (The Notebook, Whiplash and Project Hail Mary are listed above)
+the-devil-wears-prada-2006 12
+arrival-2016 12
+a-quiet-place-2018 12
+the-social-network-2010 12
+past-lives-2023 12
+interstellar-2014 12
+black-swan-2010 12
+knives-out-2019 12
+her-2013 12
+room-2015 12
+the-wolf-of-wall-street-2013 12
+brooklyn-2015 12
+the-curious-case-of-benjamin-button-2008 12
+the-prestige-2006 12
+the-silence-of-the-lambs-1991 12
