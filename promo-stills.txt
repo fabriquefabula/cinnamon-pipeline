@@ -65,3 +65,11 @@ brooklyn-2015 12
 the-curious-case-of-benjamin-button-2008 12
 the-prestige-2006 12
 the-silence-of-the-lambs-1991 12
+# Films that feel like GTA 6: carousel
+spring-breakers-2013 20
+good-time-2017 20
+true-romance-1993 20
+nightcrawler-2014 20
+baby-driver-2017 20
+pain-gain-2013 20
+scarface-1983 20
